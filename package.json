@@ -1,5 +1,5 @@
 {
-  "name": "novel",
+  "name": "novel-monorepo",
   "private": true,
   "scripts": {
     "changeset": "changeset",
