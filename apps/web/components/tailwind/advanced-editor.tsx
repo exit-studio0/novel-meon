@@ -1,5 +1,6 @@
 "use client";
 import { defaultEditorContent } from "@/lib/content";
+import { cn } from "@/lib/utils";
 import {
   EditorCommand,
   EditorCommandEmpty,
@@ -32,10 +33,22 @@ const hljs = require("highlight.js");
 
 const extensions = [...defaultExtensions, slashCommand];
 
-const TailwindAdvancedEditor = () => {
+type TailwindAdvancedEditorProps = {
+  storageKey: string;
+  onMarkdownChange?: (markdown: string) => void;
+  wrapperClassName?: string;
+  editorClassName?: string;
+};
+
+const TailwindAdvancedEditor = ({
+  storageKey,
+  onMarkdownChange,
+  wrapperClassName,
+  editorClassName,
+}: TailwindAdvancedEditorProps) => {
   const [initialContent, setInitialContent] = useState<null | JSONContent>(null);
   const [saveStatus, setSaveStatus] = useState("Saved");
-  const [charsCount, setCharsCount] = useState();
+  const [charsCount, setCharsCount] = useState<number | undefined>(undefined);
 
   const [openNode, setOpenNode] = useState(false);
   const [openColor, setOpenColor] = useState(false);
@@ -56,22 +69,28 @@ const TailwindAdvancedEditor = () => {
   const debouncedUpdates = useDebouncedCallback(async (editor: EditorInstance) => {
     const json = editor.getJSON();
     setCharsCount(editor.storage.characterCount.words());
-    window.localStorage.setItem("html-content", highlightCodeblocks(editor.getHTML()));
-    window.localStorage.setItem("novel-content", JSON.stringify(json));
-    window.localStorage.setItem("markdown", editor.storage.markdown.getMarkdown());
+    const html = highlightCodeblocks(editor.getHTML());
+    const markdown = editor.storage.markdown.getMarkdown();
+    window.localStorage.setItem(`${storageKey}:html-content`, html);
+    window.localStorage.setItem(`${storageKey}:novel-content`, JSON.stringify(json));
+    window.localStorage.setItem(`${storageKey}:markdown`, markdown);
+    onMarkdownChange?.(markdown);
     setSaveStatus("Saved");
-  }, 500);
+  }, 200);
 
   useEffect(() => {
-    const content = window.localStorage.getItem("novel-content");
+    const existingMarkdown = window.localStorage.getItem(`${storageKey}:markdown`);
+    if (existingMarkdown) onMarkdownChange?.(existingMarkdown);
+
+    const content = window.localStorage.getItem(`${storageKey}:novel-content`);
     if (content) setInitialContent(JSON.parse(content));
     else setInitialContent(defaultEditorContent);
-  }, []);
+  }, [storageKey, onMarkdownChange]);
 
   if (!initialContent) return null;
 
   return (
-    <div className="relative w-full max-w-screen-lg">
+    <div className={cn("relative w-full max-w-screen-lg", wrapperClassName)}>
       <div className="flex absolute right-5 top-5 z-10 mb-5 gap-2">
         <div className="rounded-lg bg-accent px-2 py-1 text-sm text-muted-foreground">{saveStatus}</div>
         <div className={charsCount ? "rounded-lg bg-accent px-2 py-1 text-sm text-muted-foreground" : "hidden"}>
@@ -82,7 +101,10 @@ const TailwindAdvancedEditor = () => {
         <EditorContent
           initialContent={initialContent}
           extensions={extensions}
-          className="relative min-h-[500px] w-full max-w-screen-lg border-muted bg-background sm:mb-[calc(20vh)] sm:rounded-lg sm:border sm:shadow-lg"
+          className={cn(
+            "relative min-h-[500px] w-full max-w-screen-lg border-muted bg-background sm:mb-[calc(20vh)] sm:rounded-lg sm:border sm:shadow-lg",
+            editorClassName,
+          )}
           editorProps={{
             handleDOMEvents: {
               keydown: (_view, event) => handleCommandNavigation(event),
@@ -95,6 +117,7 @@ const TailwindAdvancedEditor = () => {
             },
           }}
           onUpdate={({ editor }) => {
+            onMarkdownChange?.(editor.storage.markdown.getMarkdown());
             debouncedUpdates(editor);
             setSaveStatus("Unsaved");
           }}

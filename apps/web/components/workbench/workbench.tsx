@@ -1,6 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
+import TailwindAdvancedEditor from "@/components/tailwind/advanced-editor";
 import {
   ArrowUp,
   ChevronDown,
@@ -14,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import Markdown from "react-markdown";
 
 type FsNodeType = "folder" | "file";
 
@@ -137,6 +139,7 @@ export default function Workbench() {
   const [root, setRoot] = useState<FsNode>(() => defaultRoot());
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["root"]));
   const [activeFileId, setActiveFileId] = useState<string | null>(null);
+  const [previewMarkdown, setPreviewMarkdown] = useState("");
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [renaming, setRenaming] = useState<{ nodeId: string; value: string } | null>(null);
   const [moveTarget, setMoveTarget] = useState<{ nodeId: string; targetFolderId: string } | null>(null);
@@ -164,6 +167,11 @@ export default function Workbench() {
     if (!activeFileId) return null;
     return findNode(root, activeFileId)?.node ?? null;
   }, [root, activeFileId]);
+
+  const activeStorageKey = useMemo(() => {
+    if (!activeFileId) return null;
+    return `fs:${activeFileId}`;
+  }, [activeFileId]);
 
   const foldersForMove = useMemo(() => {
     if (!moveTarget) return [];
@@ -193,6 +201,15 @@ export default function Workbench() {
   }, [contextMenu]);
 
   useEffect(() => {
+    if (!activeStorageKey) {
+      setPreviewMarkdown("");
+      return;
+    }
+    const existing = window.localStorage.getItem(`${activeStorageKey}:markdown`);
+    setPreviewMarkdown(existing ?? "");
+  }, [activeStorageKey]);
+
+  useEffect(() => {
     if (!renaming) return;
     const id = window.requestAnimationFrame(() => {
       renameInputRef.current?.focus();
@@ -218,7 +235,23 @@ export default function Workbench() {
     setRenaming({ nodeId: id, value: name });
   };
 
+  const createMdFile = (parentId: string) => {
+    const id = uid("md");
+    const name = "新建文档.md";
+    setRoot((prev) => attachNode(prev, parentId, { id, type: "file", name, content: "" }));
+    setExpanded((prev) => new Set(prev).add(parentId));
+    setActiveFileId(id);
+    setRenaming({ nodeId: id, value: name });
+  };
+
   const deleteNodeById = (id: string) => {
+    const found = findNode(root, id);
+    if (found?.node.type === "file") {
+      const key = `fs:${id}`;
+      window.localStorage.removeItem(`${key}:html-content`);
+      window.localStorage.removeItem(`${key}:novel-content`);
+      window.localStorage.removeItem(`${key}:markdown`);
+    }
     setRoot((prev) => removeNode(prev, id));
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -229,8 +262,13 @@ export default function Workbench() {
   };
 
   const commitRename = (nodeId: string, value: string) => {
-    const nextName = value.trim() || "未命名";
-    setRoot((prev) => updateNode(prev, nodeId, (n) => ({ ...n, name: nextName })));
+    setRoot((prev) => {
+      const found = findNode(prev, nodeId);
+      const trimmed = value.trim() || "未命名";
+      const nextName =
+        found?.node.type === "file" && !trimmed.toLowerCase().endsWith(".md") ? `${trimmed}.md` : trimmed;
+      return updateNode(prev, nodeId, (n) => ({ ...n, name: nextName }));
+    });
     setRenaming(null);
   };
 
@@ -351,11 +389,42 @@ export default function Workbench() {
       ? node.children?.map((c) => {
           if (c.type === "folder") return renderTree(c, depth + 1);
           const isActive = activeFileId === c.id;
-          return (
+          const isRenaming = renaming?.nodeId === c.id;
+          return isRenaming ? (
+            <div
+              key={c.id}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setContextMenu({ x: e.clientX, y: e.clientY, nodeId: c.id });
+              }}
+              className={cn(
+                "flex h-7 w-full select-none items-center gap-2 px-3 text-xs transition-colors",
+                "text-zinc-500 hover:bg-zinc-800/50",
+              )}
+            >
+              {rowGuides(depth + 1)}
+              <span className={cn("shrink-0", isActive ? "text-zinc-300" : "text-zinc-600")}>{fileIcon(c.name)}</span>
+              <input
+                ref={renameInputRef}
+                value={renaming.value}
+                onChange={(e) => setRenaming({ nodeId: c.id, value: e.target.value })}
+                onBlur={() => commitRename(c.id, renaming.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitRename(c.id, renaming.value);
+                  if (e.key === "Escape") setRenaming(null);
+                }}
+                className="h-5 w-full rounded bg-zinc-900 px-2 text-xs text-zinc-200 outline-none ring-1 ring-zinc-700 focus:ring-blue-500/50"
+              />
+            </div>
+          ) : (
             <button
               key={c.id}
               type="button"
               onClick={() => setActiveFileId(c.id)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setContextMenu({ x: e.clientX, y: e.clientY, nodeId: c.id });
+              }}
               aria-selected={isActive}
               className={cn(
                 "flex h-7 w-full cursor-pointer select-none items-center gap-2 px-3 text-xs transition-colors",
@@ -383,14 +452,24 @@ export default function Workbench() {
       <aside className="flex w-60 shrink-0 flex-col border-r border-zinc-800 bg-[#121212]">
         <div className="flex items-center justify-between p-3 px-4 text-[10px] font-bold uppercase tracking-wider text-zinc-600">
           <span className="truncate">项目: {root.name}</span>
-          <button
-            onClick={() => createFolder("root")}
-            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
-            type="button"
-          >
-            <Plus size={12} />
-            新建
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => createFolder("root")}
+              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
+              type="button"
+            >
+              <Plus size={12} />
+              文件夹
+            </button>
+            <button
+              onClick={() => createMdFile("root")}
+              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
+              type="button"
+            >
+              <Plus size={12} />
+              MD
+            </button>
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto py-1">{renderTree(root, 0)}</div>
       </aside>
@@ -427,15 +506,63 @@ export default function Workbench() {
           <div className="h-full flex-1 border-b border-zinc-800" />
         </div>
 
-        <div className="flex-1 overflow-auto p-6 font-mono text-sm leading-relaxed">
-          {activeFile?.type === "file" ? (
-            <pre className="text-zinc-400">
-              <code className="block whitespace-pre-wrap">{activeFile.content ?? "// 暂无内容"}</code>
-            </pre>
+        <div className="flex-1 overflow-hidden">
+          {activeFile?.type === "file" && activeStorageKey ? (
+            <div className="flex h-full">
+              <div className="flex w-1/2 min-w-0 flex-col border-r border-zinc-800">
+                <div className="shrink-0 border-b border-zinc-800 bg-[#121212] px-4 py-2 text-xs text-zinc-500">
+                  编辑
+                </div>
+                <div className="flex-1 overflow-auto p-4">
+                  <TailwindAdvancedEditor
+                    key={activeStorageKey}
+                    storageKey={activeStorageKey}
+                    onMarkdownChange={setPreviewMarkdown}
+                    wrapperClassName="max-w-none"
+                    editorClassName="max-w-none sm:mb-0 sm:rounded-none sm:border-0 sm:shadow-none"
+                  />
+                </div>
+              </div>
+
+              <div className="flex w-1/2 min-w-0 flex-col">
+                <div className="shrink-0 border-b border-zinc-800 bg-[#121212] px-4 py-2 text-xs text-zinc-500">
+                  实时预览
+                </div>
+                <div className="flex-1 overflow-auto p-4">
+                  <div className="prose prose-sm max-w-none prose-invert">
+                    <Markdown
+                      components={{
+                        code(props) {
+                          const { className, children } = props as { className?: string; children?: unknown };
+                          const inline = (props as { inline?: boolean }).inline;
+                          const text = String(children ?? "").replace(/\n$/, "");
+                          if (inline) return <code className={className}>{children as string}</code>;
+                          const match = /language-(\w+)/.exec(className ?? "");
+                          if (!match) {
+                            return (
+                              <pre className="rounded-md bg-black/40 p-3">
+                                <code>{text}</code>
+                              </pre>
+                            );
+                          }
+                          return (
+                            <pre className="rounded-md bg-black/40 p-3">
+                              <code className={className}>{text}</code>
+                            </pre>
+                          );
+                        },
+                      }}
+                    >
+                      {previewMarkdown}
+                    </Markdown>
+                  </div>
+                </div>
+              </div>
+            </div>
           ) : (
-            <div className="text-sm text-zinc-500">
-              <div className="mb-2 text-zinc-400">在左侧创建文件夹并选择文件进行查看。</div>
-              <div className="text-xs text-zinc-600">右键文件夹可重命名、删除或移动。</div>
+            <div className="flex-1 overflow-auto p-6 text-sm text-zinc-500">
+              <div className="mb-2 text-zinc-400">在左侧新建并选择 md 文件开始编辑。</div>
+              <div className="text-xs text-zinc-600">右键文件夹可新建文件夹或 md 文件，也可重命名、删除、移动。</div>
             </div>
           )}
         </div>
@@ -572,58 +699,85 @@ export default function Workbench() {
           style={{ left: contextMenu.x, top: contextMenu.y }}
           className="fixed z-50 w-44 overflow-hidden rounded-lg border border-zinc-800 bg-[#1e1e1e] shadow-xl"
         >
-          <button
-            onClick={() => {
-              setContextMenu(null);
-              createFolder(contextMenu.nodeId);
-            }}
-            className="flex w-full items-center justify-between px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800/60"
-            type="button"
-          >
-            新建文件夹 <Plus size={12} className="text-zinc-500" />
-          </button>
-          <button
-            onClick={() => {
-              const found = findNode(root, contextMenu.nodeId);
-              if (found) setRenaming({ nodeId: found.node.id, value: found.node.name });
-              setContextMenu(null);
-            }}
-            className="flex w-full items-center justify-between px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800/60"
-            type="button"
-          >
-            重命名 <span className="text-zinc-500">F2</span>
-          </button>
-          <button
-            onClick={() => {
-              if (contextMenu.nodeId !== "root") startMove(contextMenu.nodeId);
-              setContextMenu(null);
-            }}
-            disabled={contextMenu.nodeId === "root"}
-            className={cn(
-              "flex w-full items-center justify-between px-3 py-2 text-xs",
-              contextMenu.nodeId === "root"
-                ? "cursor-not-allowed text-zinc-600"
-                : "text-zinc-300 hover:bg-zinc-800/60",
-            )}
-            type="button"
-          >
-            移动 <span className="text-zinc-500">…</span>
-          </button>
-          <div className="h-px bg-zinc-800" />
-          <button
-            onClick={() => {
-              if (contextMenu.nodeId !== "root") deleteNodeById(contextMenu.nodeId);
-              setContextMenu(null);
-            }}
-            disabled={contextMenu.nodeId === "root"}
-            className={cn(
-              "flex w-full items-center justify-between px-3 py-2 text-xs",
-              contextMenu.nodeId === "root" ? "cursor-not-allowed text-zinc-600" : "text-rose-300 hover:bg-rose-500/10",
-            )}
-            type="button"
-          >
-            删除 <span className="text-zinc-500">Del</span>
-          </button>
+          {(() => {
+            const found = findNode(root, contextMenu.nodeId);
+            const nodeType = found?.node.type;
+            const isRoot = contextMenu.nodeId === "root";
+
+            return (
+              <>
+                {nodeType === "folder" ? (
+                  <>
+                    <button
+                      onClick={() => {
+                        setContextMenu(null);
+                        createFolder(contextMenu.nodeId);
+                      }}
+                      className="flex w-full items-center justify-between px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800/60"
+                      type="button"
+                    >
+                      新建文件夹 <Plus size={12} className="text-zinc-500" />
+                    </button>
+                    <button
+                      onClick={() => {
+                        setContextMenu(null);
+                        createMdFile(contextMenu.nodeId);
+                      }}
+                      className="flex w-full items-center justify-between px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800/60"
+                      type="button"
+                    >
+                      新建 md <FileText size={12} className="text-zinc-500" />
+                    </button>
+                    <div className="h-px bg-zinc-800" />
+                  </>
+                ) : null}
+
+                <button
+                  onClick={() => {
+                    const found2 = findNode(root, contextMenu.nodeId);
+                    if (found2) setRenaming({ nodeId: found2.node.id, value: found2.node.name });
+                    setContextMenu(null);
+                  }}
+                  className="flex w-full items-center justify-between px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800/60"
+                  type="button"
+                >
+                  重命名 <span className="text-zinc-500">F2</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    if (!isRoot) startMove(contextMenu.nodeId);
+                    setContextMenu(null);
+                  }}
+                  disabled={isRoot}
+                  className={cn(
+                    "flex w-full items-center justify-between px-3 py-2 text-xs",
+                    isRoot ? "cursor-not-allowed text-zinc-600" : "text-zinc-300 hover:bg-zinc-800/60",
+                  )}
+                  type="button"
+                >
+                  移动 <span className="text-zinc-500">…</span>
+                </button>
+
+                <div className="h-px bg-zinc-800" />
+
+                <button
+                  onClick={() => {
+                    if (!isRoot) deleteNodeById(contextMenu.nodeId);
+                    setContextMenu(null);
+                  }}
+                  disabled={isRoot}
+                  className={cn(
+                    "flex w-full items-center justify-between px-3 py-2 text-xs",
+                    isRoot ? "cursor-not-allowed text-zinc-600" : "text-rose-300 hover:bg-rose-500/10",
+                  )}
+                  type="button"
+                >
+                  删除 <span className="text-zinc-500">Del</span>
+                </button>
+              </>
+            );
+          })()}
         </div>
       ) : null}
 
