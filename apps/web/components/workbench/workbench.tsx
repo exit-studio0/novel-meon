@@ -420,7 +420,7 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
       id,
       title: "对话 1",
       createdAt: Date.now(),
-      messages: [{ id: uid("m"), role: "assistant", content: "你好，我能帮你做什么？" }],
+      messages: [],
     };
     setProjectConversations((prev) => ({ ...prev, [activeProjectId]: [next] }));
     setActiveConversationIdByProject((prev) => ({ ...prev, [activeProjectId]: id }));
@@ -563,7 +563,7 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
       id,
       title: `对话 ${(projectConversations[activeProjectId]?.length ?? 0) + 1}`,
       createdAt: Date.now(),
-      messages: [{ id: uid("m"), role: "assistant", content: "你好，我能帮你做什么？" }],
+      messages: [],
     };
     setProjectConversations((prev) => ({
       ...prev,
@@ -1119,6 +1119,17 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
           {!activeProjectId ? (
             <div className="flex h-full items-center justify-center rounded-xl border border-zinc-800 bg-[#151515] p-6 text-sm text-zinc-500">
               请选择 Root/ 下的一个项目文件夹后开始聊天。
+            </div>
+          ) : activeConversation?.messages.length === 0 ? (
+            // 空状态占位 - 可自定义内容
+            <div className="flex h-full flex-col items-center justify-center space-y-4 text-center">
+               <div className="rounded-full bg-zinc-800/50 p-4">
+                 <Sparkles className="h-6 w-6 text-zinc-500" />
+               </div>
+               <div className="space-y-1">
+                 <h3 className="text-sm font-medium text-zinc-300">开始新的对话</h3>
+                 <p className="text-xs text-zinc-500">选择模型并发送消息以开始</p>
+               </div>
             </div>
           ) : (
             <div className="space-y-4">
