@@ -18,7 +18,7 @@ export async function createClient() {
               cookieStore.set(name, value, {
                 ...options,
                 // 关键点：保持与主站完全一致的 domain 策略
-                domain: process.env.NODE_ENV === 'production' ? '.xxx.art' : undefined,
+                domain: process.env.NODE_ENV === 'production' ? '.meonai.art' : undefined,
               })
             })
           } catch (error) {

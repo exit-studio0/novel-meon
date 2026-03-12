@@ -24,7 +24,7 @@ export async function updateSession(request: NextRequest) {
           cookiesToSet.forEach(({ name, value, options }) => {
             supabaseResponse.cookies.set(name, value, {
               ...options,
-              domain: process.env.NODE_ENV === 'production' ? '.xxx.art' : undefined,
+              domain: process.env.NODE_ENV === 'production' ? '.meonai.art' : undefined,
             })
           })
         },

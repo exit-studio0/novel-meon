@@ -7,7 +7,7 @@ export default async function Page() {
 
   // 如果未登录，重定向回主站的登录页
   if (!settings) {
-     redirect('https://xxx.art/login?redirect=https://noval.xxx.art');
+     redirect('https://meonai.art');
   }
 
   return <Workbench />;
