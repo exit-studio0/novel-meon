@@ -21,9 +21,9 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SettingsModal } from "@/components/workbench/settings-modal";
 
-type FsNodeType = "folder" | "file";
+export type FsNodeType = "folder" | "file";
 
-type FsNode = {
+export type FsNode = {
   id: string;
   type: FsNodeType;
   name: string;
@@ -156,8 +156,8 @@ function rowGuides(depth: number) {
   );
 }
 
-function recoverOrphans(root: FsNode): FsNode {
-  if (typeof window === "undefined") return root;
+export function findOrphanIds(root: FsNode): string[] {
+  if (typeof window === "undefined") return [];
 
   const existingIds = new Set<string>();
   const walk = (n: FsNode) => {
@@ -179,7 +179,11 @@ function recoverOrphans(root: FsNode): FsNode {
       }
     }
   }
+  return orphans;
+}
 
+function recoverOrphans(root: FsNode): FsNode {
+  const orphans = findOrphanIds(root);
   if (orphans.length === 0) return root;
 
   let newRoot = { ...root };
@@ -568,6 +572,31 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
     setActiveConversationIdByProject((prev) => ({ ...prev, [activeProjectId]: id }));
   };
 
+  const recoverFile = (orphanId: string) => {
+    // 恢复到当前激活的项目文件夹，或者根目录
+    const targetFolderId = activeProjectId ?? "root";
+    if (!nodeIsInActiveProject(targetFolderId)) return;
+
+    const fileNode: FsNode = {
+      id: orphanId,
+      type: "file",
+      name: `Recovered_${orphanId.slice(0, 6)}.md`,
+      content: "",
+    };
+    setRoot((prev) => attachNode(prev, targetFolderId, fileNode));
+    setExpanded((prev) => new Set(prev).add(targetFolderId));
+    setActiveFileId(orphanId);
+  };
+
+  const deleteOrphanFile = (orphanId: string) => {
+    const key = `fs:${orphanId}`;
+    window.localStorage.removeItem(`${key}:html-content`);
+    window.localStorage.removeItem(`${key}:novel-content`);
+    window.localStorage.removeItem(`${key}:markdown`);
+    // 触发 UI 更新可能需要在 SettingsModal 内部处理，或者通过修改 root 触发（但这里没有修改 root）
+    // 由于我们传递了 onRecover/onDelete 给 SettingsModal，它可以在调用后更新自己的列表状态
+  };
+
   const sendMessage = () => {
     if (!activeProjectId) return;
     const content = draft.trim();
@@ -786,10 +815,6 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
     );
   };
 
-  const handleRecoverFiles = () => {
-    setRoot((prev) => recoverOrphans(prev));
-  };
-
   return (
     <div className="flex h-screen w-full overflow-hidden bg-[#121212] font-sans text-zinc-300 selection:bg-blue-500/30">
       <aside className="flex w-60 shrink-0 flex-col border-r border-zinc-800 bg-[#121212]">
@@ -866,7 +891,9 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
         <SettingsModal
           onClose={() => setIsSettingsOpen(false)}
           user={user}
-          onRecoverFiles={handleRecoverFiles}
+          root={root}
+          onRecover={recoverFile}
+          onDeleteOrphan={deleteOrphanFile}
         />
       )}
 
