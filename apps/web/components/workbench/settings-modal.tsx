@@ -10,7 +10,7 @@ import {
   FileText,
   Eye
 } from 'lucide-react';
-import { findOrphanIds, FsNode } from './workbench';
+import { findOrphanIds, type FsNode } from './workbench';
 
 interface SettingsModalProps {
   onClose: () => void;
