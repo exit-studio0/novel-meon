@@ -40,6 +40,8 @@ export interface JimengGlobalConfig {
 // 组合后的完整表结构类型 (用于 Supabase 响应)
 export interface UserSettingsRow {
   user_id: string;
+  email?: string;
+  user_metadata?: any;
   registry_config: ModelRegistryState;
   jimeng_config: JimengGlobalConfig;
 }

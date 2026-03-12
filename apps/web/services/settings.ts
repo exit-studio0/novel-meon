@@ -33,6 +33,8 @@ export async function getUserSettings(): Promise<UserSettingsRow | null> {
   // 3. 返回强类型数据
   return {
     user_id: user.id,
+    email: user.email,
+    user_metadata: user.user_metadata,
     registry_config: data.registry_config as UserSettingsRow['registry_config'],
     jimeng_config: data.jimeng_config as UserSettingsRow['jimeng_config']
   }

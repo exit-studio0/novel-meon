@@ -7,8 +7,8 @@ export default async function Page() {
 
   // 如果未登录，重定向回主站的登录页
   if (!settings) {
-     redirect('https://meonai.art');
+     redirect('https://meonai.art/login?redirect=https://novel.meonai.art');
   }
 
-  return <Workbench />;
+  return <Workbench user={settings} />;
 }

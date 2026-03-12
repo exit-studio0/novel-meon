@@ -209,7 +209,9 @@ function recoverOrphans(root: FsNode): FsNode {
   return currentRoot;
 }
 
-export default function Workbench() {
+import { UserSettingsRow } from "@/types/settings";
+
+export default function Workbench({ user }: { user?: UserSettingsRow }) {
   const [root, setRoot] = useState<FsNode>(() => defaultRoot());
   const [isLoaded, setIsLoaded] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["root"]));
@@ -783,6 +785,25 @@ export default function Workbench() {
           </div>
         </div>
         <div className="flex-1 overflow-y-auto py-1">{renderTree(root, 0, null)}</div>
+        
+        {/* 用户信息区域 */}
+        {user && (
+          <div className="border-t border-zinc-800 p-3">
+            <div className="flex items-center gap-2 rounded-md bg-zinc-900/50 p-2">
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-600/20 text-xs font-medium text-blue-400">
+                {user.email?.slice(0, 2).toUpperCase() || 'U'}
+              </div>
+              <div className="flex min-w-0 flex-col justify-center">
+                <span className="truncate text-xs font-medium text-zinc-300">
+                  {user.user_metadata?.full_name || user.user_metadata?.name || user.email?.split('@')[0] || 'User'}
+                </span>
+                <span className="truncate text-[10px] text-zinc-500">
+                  {user.email}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
       </aside>
 
       <main className="flex min-w-0 flex-1 flex-col bg-[#0d0d0d]">
