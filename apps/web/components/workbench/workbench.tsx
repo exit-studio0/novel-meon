@@ -991,7 +991,7 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
         </div>
 
         <div className="shrink-0 border-t border-zinc-800 bg-[#1c1c1c] p-4">
-          <div className="relative overflow-hidden rounded-xl border border-zinc-700 bg-[#252525] shadow-inner transition-all focus-within:border-blue-500/50 focus-within:ring-1 focus-within:ring-blue-500/20">
+          <div className="relative rounded-xl border border-zinc-700 bg-[#252525] shadow-inner transition-all focus-within:border-blue-500/50 focus-within:ring-1 focus-within:ring-blue-500/20">
             <textarea
               placeholder="计划、搜索、构建任何东西..."
               value={draft}
@@ -1030,7 +1030,7 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
                   </button>
                   
                   {isModelSelectorOpen && (
-                    <div className="absolute bottom-full left-0 mb-2 w-48 overflow-hidden rounded-lg border border-zinc-800 bg-[#1e1e1e] shadow-xl">
+                    <div className="absolute bottom-full left-0 z-50 mb-2 w-48 overflow-hidden rounded-lg border border-zinc-800 bg-[#1e1e1e] shadow-xl">
                       <div className="p-1">
                         {chatModels.length === 0 ? (
                           <div className="px-3 py-2 text-xs text-zinc-500">无可用模型</div>
