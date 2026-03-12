@@ -211,6 +211,7 @@ function recoverOrphans(root: FsNode): FsNode {
 
 export default function Workbench() {
   const [root, setRoot] = useState<FsNode>(() => defaultRoot());
+  const [isLoaded, setIsLoaded] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["root"]));
   const [activeFileId, setActiveFileId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
@@ -233,14 +234,16 @@ export default function Workbench() {
       } catch {}
     }
     setRoot(recoverOrphans(loaded));
+    setIsLoaded(true);
   }, []);
 
   useEffect(() => {
+    if (!isLoaded) return;
     const timer = setTimeout(() => {
       window.localStorage.setItem("meon:fs:v1", JSON.stringify(root));
     }, 1000);
     return () => clearTimeout(timer);
-  }, [root]);
+  }, [root, isLoaded]);
 
   const activeProject = useMemo(() => {
     if (!activeProjectId) return null;
