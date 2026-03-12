@@ -154,6 +154,61 @@ function rowGuides(depth: number) {
   );
 }
 
+function recoverOrphans(root: FsNode): FsNode {
+  if (typeof window === "undefined") return root;
+
+  const existingIds = new Set<string>();
+  const walk = (n: FsNode) => {
+    existingIds.add(n.id);
+    n.children?.forEach(walk);
+  };
+  walk(root);
+
+  const orphans: string[] = [];
+  for (let i = 0; i < window.localStorage.length; i++) {
+    const key = window.localStorage.key(i);
+    if (key?.startsWith("fs:") && (key.endsWith(":markdown") || key.endsWith(":novel-content"))) {
+      const parts = key.split(":");
+      if (parts.length === 3) {
+        const id = parts[1];
+        if (!existingIds.has(id) && !orphans.includes(id)) {
+          orphans.push(id);
+        }
+      }
+    }
+  }
+
+  if (orphans.length === 0) return root;
+
+  let newRoot = { ...root };
+  let recoveredFolder = newRoot.children?.find((c) => c.name === "恢复的文件" && c.type === "folder");
+  let targetId = recoveredFolder?.id;
+
+  if (!recoveredFolder) {
+    targetId = uid("f_recovered");
+    recoveredFolder = {
+      id: targetId,
+      type: "folder",
+      name: "恢复的文件",
+      children: [],
+    };
+    newRoot = attachNode(newRoot, "root", recoveredFolder);
+  }
+
+  let currentRoot = newRoot;
+  for (const orphanId of orphans) {
+    const fileNode: FsNode = {
+      id: orphanId,
+      type: "file",
+      name: `Recovered_${orphanId.slice(0, 6)}.md`,
+      content: "",
+    };
+    currentRoot = attachNode(currentRoot, targetId!, fileNode);
+  }
+
+  return currentRoot;
+}
+
 export default function Workbench() {
   const [root, setRoot] = useState<FsNode>(() => defaultRoot());
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["root"]));
@@ -167,6 +222,25 @@ export default function Workbench() {
   const [activeConversationIdByProject, setActiveConversationIdByProject] = useState<Record<string, string | null>>({});
   const [draft, setDraft] = useState("");
   const [chatSaveStatus, setChatSaveStatus] = useState("已保存");
+
+  useEffect(() => {
+    const raw = window.localStorage.getItem("meon:fs:v1");
+    let loaded = defaultRoot();
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed?.id === "root") loaded = parsed;
+      } catch {}
+    }
+    setRoot(recoverOrphans(loaded));
+  }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      window.localStorage.setItem("meon:fs:v1", JSON.stringify(root));
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [root]);
 
   const activeProject = useMemo(() => {
     if (!activeProjectId) return null;
