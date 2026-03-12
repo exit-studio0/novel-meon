@@ -597,18 +597,135 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
     // 由于我们传递了 onRecover/onDelete 给 SettingsModal，它可以在调用后更新自己的列表状态
   };
 
-  const sendMessage = () => {
+  const [isGenerating, setIsGenerating] = useState(false);
+
+  const sendMessage = async () => {
     if (!activeProjectId) return;
     const content = draft.trim();
     if (!content || !activeConversationId) return;
     setDraft("");
+
+    // 1. 添加用户消息到界面
+    const userMsgId = uid("m");
     setProjectConversations((prev) => ({
       ...prev,
       [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
         if (c.id !== activeConversationId) return c;
-        return { ...c, messages: [...c.messages, { id: uid("m"), role: "user", content }] };
+        return { ...c, messages: [...c.messages, { id: userMsgId, role: "user", content }] };
       }),
     }));
+
+    // 2. 准备 AI 回复的消息占位
+    const assistantMsgId = uid("m");
+    setIsGenerating(true);
+    setProjectConversations((prev) => ({
+      ...prev,
+      [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
+        if (c.id !== activeConversationId) return c;
+        return { ...c, messages: [...c.messages, { id: assistantMsgId, role: "assistant", content: "" }] }; // 初始为空
+      }),
+    }));
+
+    try {
+      // 3. 获取当前模型配置
+      const config = user?.registry_config as unknown as MeonRegistryConfig;
+      const requestConfig = getActiveChatModelConfig(config, selectedModelId || undefined);
+
+      if (!requestConfig || !requestConfig.apiKey) {
+        throw new Error("未配置有效的模型或 API Key");
+      }
+
+      // 4. 调用 OpenAI 兼容接口
+      const response = await fetch(`${requestConfig.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${requestConfig.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: requestConfig.modelName,
+          messages: [
+            // 获取当前对话的历史消息
+            ...(projectConversations[activeProjectId]?.find(c => c.id === activeConversationId)?.messages.map(m => ({
+              role: m.role,
+              content: m.content
+            })) || []),
+            { role: "user", content }
+          ],
+          stream: true, // 启用流式传输
+          ...requestConfig.params,
+        }),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`API Error: ${response.status} - ${errText}`);
+      }
+
+      if (!response.body) throw new Error("No response body");
+
+      // 5. 处理流式响应
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let fullContent = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split("\n").filter((line) => line.trim() !== "");
+
+        for (const line of lines) {
+          if (line === "data: [DONE]") break;
+          if (line.startsWith("data: ")) {
+            try {
+              const jsonStr = line.slice(6);
+              const json = JSON.parse(jsonStr);
+              const delta = json.choices[0]?.delta?.content || "";
+              
+              if (delta) {
+                fullContent += delta;
+                
+                // 实时更新 UI
+                setProjectConversations((prev) => ({
+                  ...prev,
+                  [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
+                    if (c.id !== activeConversationId) return c;
+                    return {
+                      ...c,
+                      messages: c.messages.map((m) =>
+                        m.id === assistantMsgId ? { ...m, content: fullContent } : m
+                      ),
+                    };
+                  }),
+                }));
+              }
+            } catch (e) {
+              console.warn("Failed to parse chunk", e);
+            }
+          }
+        }
+      }
+
+    } catch (error: any) {
+      console.error("Chat error:", error);
+      // 将错误信息显示在对话中
+      setProjectConversations((prev) => ({
+        ...prev,
+        [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
+          if (c.id !== activeConversationId) return c;
+          return {
+            ...c,
+            messages: c.messages.map((m) =>
+              m.id === assistantMsgId ? { ...m, content: `Error: ${error.message || "请求失败"}` } : m
+            ),
+          };
+        }),
+      }));
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   const downloadTextFile = (filename: string, text: string, mime: string) => {
@@ -1035,7 +1152,7 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
               <div className="flex items-center gap-2 text-[11px] text-zinc-500">
                 <div className="h-3 w-3 animate-spin rounded-full border-2 border-zinc-700 border-t-zinc-400" />
                 <span>
-                  思考中 <span className="text-zinc-400">6s</span>
+                  思考中 <span className="text-zinc-400">...</span>
                 </span>
               </div>
             </div>
@@ -1052,10 +1169,10 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  sendMessage();
+                  if (!isGenerating) sendMessage();
                 }
               }}
-              disabled={!activeProjectId}
+              disabled={!activeProjectId || isGenerating}
               className={cn(
                 "w-full resize-none bg-transparent p-4 pb-12 text-[13px] outline-none placeholder:text-zinc-500",
                 activeProjectId ? "text-zinc-100" : "cursor-not-allowed text-zinc-600",
@@ -1115,15 +1232,20 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
               </div>
               <button
                 onClick={sendMessage}
+                disabled={!activeProjectId || isGenerating || !draft.trim()}
                 className={cn(
                   "flex h-8 w-8 items-center justify-center rounded-full transition-all",
-                  activeProjectId && draft.trim()
+                  activeProjectId && draft.trim() && !isGenerating
                     ? "scale-105 bg-zinc-100 text-black shadow-lg"
                     : "bg-zinc-800 text-zinc-600",
                 )}
                 type="button"
               >
-                <ArrowUp size={16} strokeWidth={3} />
+                {isGenerating ? (
+                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-600 border-t-zinc-400" />
+                ) : (
+                  <ArrowUp size={16} strokeWidth={3} />
+                )}
               </button>
             </div>
           </div>
