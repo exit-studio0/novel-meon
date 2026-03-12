@@ -45,12 +45,29 @@ function uid(prefix: string) {
   return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now().toString(16)}`;
 }
 
+const emptyEditorContent = { type: "doc", content: [{ type: "paragraph" }] };
+
 function isFolder(node: FsNode): node is FsNode & { children: FsNode[] } {
   return node.type === "folder";
 }
 
 function defaultRoot(): FsNode {
   return { id: "root", type: "folder", name: "Root/", children: [] };
+}
+
+function setCookie(name: string, value: string, maxAgeSeconds: number) {
+  document.cookie = `${encodeURIComponent(name)}=${encodeURIComponent(value)}; path=/; max-age=${maxAgeSeconds}; samesite=lax`;
+}
+
+function getCookie(name: string) {
+  const encoded = encodeURIComponent(name);
+  const parts = document.cookie.split(";").map((p) => p.trim());
+  for (const p of parts) {
+    if (!p.startsWith(`${encoded}=`)) continue;
+    const raw = p.slice(encoded.length + 1);
+    return decodeURIComponent(raw);
+  }
+  return null;
 }
 
 function findNode(root: FsNode, id: string): { node: FsNode; parent: FsNode | null } | null {
@@ -142,24 +159,32 @@ export default function Workbench() {
   const [renaming, setRenaming] = useState<{ nodeId: string; value: string } | null>(null);
   const [moveTarget, setMoveTarget] = useState<{ nodeId: string; targetFolderId: string } | null>(null);
 
-  const [conversations, setConversations] = useState<Conversation[]>(() => [
-    {
-      id: uid("c"),
-      title: "对话 1",
-      createdAt: Date.now(),
-      messages: [
-        { id: uid("m"), role: "user", content: "根据附带的文档制作一个展示我们业务的落地页" },
-        { id: uid("m"), role: "assistant", content: "我将为您创建一个简约、基于衬线字体的落地页，以匹配您的品牌语调。" },
-      ],
-    },
-  ]);
-  const [activeConversationId, setActiveConversationId] = useState<string | null>(() => conversations[0]?.id ?? null);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [projectConversations, setProjectConversations] = useState<Record<string, Conversation[]>>({});
+  const [activeConversationIdByProject, setActiveConversationIdByProject] = useState<Record<string, string | null>>({});
   const [draft, setDraft] = useState("");
+  const [chatSaveStatus, setChatSaveStatus] = useState("已保存");
 
-  const activeConversation = useMemo(
-    () => conversations.find((c) => c.id === activeConversationId) ?? null,
-    [conversations, activeConversationId],
-  );
+  const activeProject = useMemo(() => {
+    if (!activeProjectId) return null;
+    const found = findNode(root, activeProjectId);
+    return found?.node.type === "folder" ? found.node : null;
+  }, [root, activeProjectId]);
+
+  const conversations = useMemo(() => {
+    if (!activeProjectId) return [];
+    return projectConversations[activeProjectId] ?? [];
+  }, [activeProjectId, projectConversations]);
+
+  const activeConversationId = useMemo(() => {
+    if (!activeProjectId) return null;
+    return activeConversationIdByProject[activeProjectId] ?? conversations[0]?.id ?? null;
+  }, [activeProjectId, activeConversationIdByProject, conversations]);
+
+  const activeConversation = useMemo(() => {
+    if (!activeProjectId) return null;
+    return conversations.find((c) => c.id === activeConversationId) ?? null;
+  }, [activeProjectId, conversations, activeConversationId]);
 
   const activeFile = useMemo(() => {
     if (!activeFileId) return null;
@@ -173,11 +198,103 @@ export default function Workbench() {
 
   const foldersForMove = useMemo(() => {
     if (!moveTarget) return [];
-    return collectFolderOptions(root, moveTarget.nodeId).filter((f) => !isDescendant(root, moveTarget.nodeId, f.id));
-  }, [root, moveTarget]);
+    const found = findNode(root, moveTarget.nodeId);
+    const isProjectFolder = !!found && found.node.type === "folder" && found.parent?.id === "root" && found.node.id !== "root";
+    const scopedRootId = activeProjectId ?? null;
+    const allowed = collectFolderOptions(root, moveTarget.nodeId).filter((f) => !isDescendant(root, moveTarget.nodeId, f.id));
+    if (isProjectFolder) return allowed.filter((f) => f.id === "root");
+    if (!scopedRootId) return allowed;
+    return allowed.filter((f) => f.id === scopedRootId || isDescendant(root, scopedRootId, f.id));
+  }, [root, moveTarget, activeProjectId]);
 
   const menuRef = useRef<HTMLDivElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const didHydrateChatRef = useRef(false);
+  const chatPersistTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const fromLocalStorageRaw = window.localStorage.getItem("meon:chat:v1");
+    const fromCookieRaw = getCookie("meon_chat_v1");
+    const parse = (raw: string | null) => {
+      if (!raw) return null;
+      try {
+        return JSON.parse(raw) as {
+          v: number;
+          activeProjectId?: string | null;
+          projectConversations?: Record<string, Conversation[]>;
+          activeConversationIdByProject?: Record<string, string | null>;
+        };
+      } catch {
+        return null;
+      }
+    };
+    const parsed = parse(fromLocalStorageRaw) ?? parse(fromCookieRaw);
+    if (parsed?.v === 1) {
+      setProjectConversations(parsed.projectConversations ?? {});
+      setActiveConversationIdByProject(parsed.activeConversationIdByProject ?? {});
+      setActiveProjectId(parsed.activeProjectId ?? null);
+    }
+    didHydrateChatRef.current = true;
+  }, []);
+
+  useEffect(() => {
+    if (!didHydrateChatRef.current) return;
+    if (chatPersistTimerRef.current) window.clearTimeout(chatPersistTimerRef.current);
+    setChatSaveStatus("未保存");
+    chatPersistTimerRef.current = window.setTimeout(() => {
+      const payload = {
+        v: 1,
+        activeProjectId,
+        projectConversations,
+        activeConversationIdByProject,
+      };
+      window.localStorage.setItem("meon:chat:v1", JSON.stringify(payload));
+
+      const tryCookie = (data: unknown) => {
+        const raw = JSON.stringify(data);
+        if (raw.length <= 3500) return raw;
+        return null;
+      };
+
+      const minimal = {
+        v: 1,
+        activeProjectId,
+        activeConversationIdByProject,
+        projectConversations: Object.fromEntries(
+          Object.entries(projectConversations).map(([pid, cs]) => [
+            pid,
+            (cs ?? []).slice(0, 3).map((c) => ({
+              id: c.id,
+              title: c.title,
+              createdAt: c.createdAt,
+              messages: (c.messages ?? []).slice(-2),
+            })),
+          ]),
+        ),
+      };
+
+      const cookieValue = tryCookie(payload) ?? tryCookie(minimal) ?? JSON.stringify({ v: 1, activeProjectId });
+      setCookie("meon_chat_v1", cookieValue, 60 * 60 * 24 * 30);
+      setChatSaveStatus("已保存");
+    }, 200);
+    return () => {
+      if (chatPersistTimerRef.current) window.clearTimeout(chatPersistTimerRef.current);
+    };
+  }, [projectConversations, activeConversationIdByProject, activeProjectId]);
+
+  useEffect(() => {
+    if (!activeProjectId) return;
+    if ((projectConversations[activeProjectId]?.length ?? 0) > 0) return;
+    const id = uid("c");
+    const next: Conversation = {
+      id,
+      title: "对话 1",
+      createdAt: Date.now(),
+      messages: [{ id: uid("m"), role: "assistant", content: "你好，我能帮你做什么？" }],
+    };
+    setProjectConversations((prev) => ({ ...prev, [activeProjectId]: [next] }));
+    setActiveConversationIdByProject((prev) => ({ ...prev, [activeProjectId]: id }));
+  }, [activeProjectId, projectConversations]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -216,7 +333,15 @@ export default function Workbench() {
     });
   };
 
+  const nodeIsInActiveProject = (nodeId: string) => {
+    if (!activeProjectId) return true;
+    if (nodeId === "root") return true;
+    if (nodeId === activeProjectId) return true;
+    return isDescendant(root, activeProjectId, nodeId);
+  };
+
   const createFolder = (parentId: string) => {
+    if (!nodeIsInActiveProject(parentId)) return;
     const id = uid("f");
     const name = "新建文件夹";
     setRoot((prev) => attachNode(prev, parentId, { id, type: "folder", name, children: [] }));
@@ -225,15 +350,22 @@ export default function Workbench() {
   };
 
   const createMdFile = (parentId: string) => {
+    if (parentId === "root") return;
+    if (!nodeIsInActiveProject(parentId)) return;
     const id = uid("md");
     const name = "新建文档.md";
     setRoot((prev) => attachNode(prev, parentId, { id, type: "file", name, content: "" }));
     setExpanded((prev) => new Set(prev).add(parentId));
     setActiveFileId(id);
     setRenaming({ nodeId: id, value: name });
+    const key = `fs:${id}`;
+    window.localStorage.setItem(`${key}:novel-content`, JSON.stringify(emptyEditorContent));
+    window.localStorage.setItem(`${key}:markdown`, "");
+    window.localStorage.setItem(`${key}:html-content`, "");
   };
 
   const deleteNodeById = (id: string) => {
+    if (!nodeIsInActiveProject(id)) return;
     const found = findNode(root, id);
     if (found?.node.type === "file") {
       const key = `fs:${id}`;
@@ -251,6 +383,10 @@ export default function Workbench() {
   };
 
   const commitRename = (nodeId: string, value: string) => {
+    if (!nodeIsInActiveProject(nodeId)) {
+      setRenaming(null);
+      return;
+    }
     setRoot((prev) => {
       const found = findNode(prev, nodeId);
       const trimmed = value.trim() || "未命名";
@@ -262,6 +398,10 @@ export default function Workbench() {
   };
 
   const startMove = (nodeId: string) => {
+    const found = findNode(root, nodeId);
+    const isProjectFolder = !!found && found.node.type === "folder" && found.parent?.id === "root" && found.node.id !== "root";
+    if (isProjectFolder) return;
+    if (!nodeIsInActiveProject(nodeId)) return;
     setMoveTarget({ nodeId, targetFolderId: "root" });
   };
 
@@ -271,6 +411,11 @@ export default function Workbench() {
     if (nodeId === "root") return;
     if (nodeId === targetFolderId) return;
     if (isDescendant(root, nodeId, targetFolderId)) return;
+    if (activeProjectId) {
+      if (!nodeIsInActiveProject(nodeId)) return;
+      if (!(targetFolderId === activeProjectId || nodeIsInActiveProject(targetFolderId))) return;
+      if (targetFolderId === "root") return;
+    }
 
     setRoot((prev) => {
       const { next, detached } = detachNode(prev, nodeId);
@@ -282,33 +427,89 @@ export default function Workbench() {
   };
 
   const newConversation = () => {
+    if (!activeProjectId) return;
     const id = uid("c");
     const next: Conversation = {
       id,
-      title: `对话 ${conversations.length + 1}`,
+      title: `对话 ${(projectConversations[activeProjectId]?.length ?? 0) + 1}`,
       createdAt: Date.now(),
       messages: [{ id: uid("m"), role: "assistant", content: "你好，我能帮你做什么？" }],
     };
-    setConversations((prev) => [next, ...prev]);
-    setActiveConversationId(id);
+    setProjectConversations((prev) => ({
+      ...prev,
+      [activeProjectId]: [next, ...(prev[activeProjectId] ?? [])],
+    }));
+    setActiveConversationIdByProject((prev) => ({ ...prev, [activeProjectId]: id }));
   };
 
   const sendMessage = () => {
+    if (!activeProjectId) return;
     const content = draft.trim();
     if (!content || !activeConversationId) return;
     setDraft("");
-    setConversations((prev) =>
-      prev.map((c) => {
+    setProjectConversations((prev) => ({
+      ...prev,
+      [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
         if (c.id !== activeConversationId) return c;
         return { ...c, messages: [...c.messages, { id: uid("m"), role: "user", content }] };
       }),
-    );
+    }));
   };
 
-  const renderTree = (node: FsNode, depth: number) => {
+  const downloadTextFile = (filename: string, text: string, mime: string) => {
+    const safe = filename.replaceAll("/", "_");
+    const blob = new Blob([text], { type: mime });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = safe;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+  };
+
+  const exportFileById = (id: string) => {
+    const found = findNode(root, id);
+    if (!found || found.node.type !== "file") return;
+    const key = `fs:${id}`;
+    const markdown = window.localStorage.getItem(`${key}:markdown`) ?? "";
+    downloadTextFile(found.node.name || "export.md", markdown, "text/markdown;charset=utf-8");
+  };
+
+  const exportFolderById = (id: string) => {
+    if (id === "root") return;
+    const found = findNode(root, id);
+    if (!found || found.node.type !== "folder") return;
+    const files: Array<{ id: string; name: string; markdown: string }> = [];
+    const walk = (n: FsNode) => {
+      if (n.type === "file") {
+        const key = `fs:${n.id}`;
+        const markdown = window.localStorage.getItem(`${key}:markdown`) ?? "";
+        files.push({ id: n.id, name: n.name, markdown });
+        return;
+      }
+      n.children?.forEach(walk);
+    };
+    walk(found.node);
+    const payload = {
+      v: 1,
+      exportedAt: Date.now(),
+      folder: { id: found.node.id, name: found.node.name },
+      tree: found.node,
+      files,
+    };
+    downloadTextFile(`${found.node.name || "folder"}.meon.json`, JSON.stringify(payload, null, 2), "application/json");
+  };
+
+  const renderTree = (node: FsNode, depth: number, parentId: string | null) => {
     if (node.type !== "folder") return null;
     const isOpen = expanded.has(node.id);
     const isRoot = node.id === "root";
+    const isProjectFolder = parentId === "root" && node.id !== "root";
+    const isInProject = nodeIsInActiveProject(node.id);
+    const isDisabled = !!activeProjectId && !isInProject && node.id !== "root";
+    const isProjectDimmed = !!activeProjectId && isProjectFolder && node.id !== activeProjectId;
 
     const row =
       renaming?.nodeId === node.id ? (
@@ -316,11 +517,13 @@ export default function Workbench() {
           key={node.id}
           onContextMenu={(e) => {
             e.preventDefault();
+            if (isDisabled) return;
             setContextMenu({ x: e.clientX, y: e.clientY, nodeId: node.id });
           }}
           className={cn(
             "flex h-7 select-none items-center gap-2 px-3 text-xs transition-colors",
             "text-zinc-500 hover:bg-zinc-800/50",
+            isDisabled || isProjectDimmed ? "opacity-40" : null,
           )}
         >
           {rowGuides(depth)}
@@ -347,19 +550,31 @@ export default function Workbench() {
         <button
           key={node.id}
           type="button"
-          onClick={() => toggleExpanded(node.id)}
+          onClick={() => {
+            if (isDisabled) return;
+            if (isProjectFolder && !activeProjectId) {
+              setActiveProjectId(node.id);
+              setActiveFileId(null);
+              setExpanded((prev) => new Set(prev).add("root").add(node.id));
+              return;
+            }
+            if (isProjectDimmed) return;
+            toggleExpanded(node.id);
+          }}
           onKeyDown={(e) => {
             if (e.key === "ArrowRight" && !isOpen) toggleExpanded(node.id);
             if (e.key === "ArrowLeft" && isOpen) toggleExpanded(node.id);
           }}
           onContextMenu={(e) => {
             e.preventDefault();
+            if (isDisabled || isProjectDimmed) return;
             setContextMenu({ x: e.clientX, y: e.clientY, nodeId: node.id });
           }}
           aria-expanded={isOpen}
           className={cn(
             "flex h-7 w-full cursor-pointer select-none items-center gap-2 px-3 text-xs transition-colors",
             "text-zinc-500 hover:bg-zinc-800/50",
+            isDisabled || isProjectDimmed ? "opacity-40" : null,
           )}
         >
           {rowGuides(depth)}
@@ -376,7 +591,9 @@ export default function Workbench() {
 
     const children = isOpen
       ? node.children?.map((c) => {
-          if (c.type === "folder") return renderTree(c, depth + 1);
+          if (c.type === "folder") return renderTree(c, depth + 1, node.id);
+          const isInProject2 = nodeIsInActiveProject(c.id);
+          const isDisabled2 = !!activeProjectId && !isInProject2;
           const isActive = activeFileId === c.id;
           const isRenaming = renaming?.nodeId === c.id;
           return isRenaming ? (
@@ -384,11 +601,13 @@ export default function Workbench() {
               key={c.id}
               onContextMenu={(e) => {
                 e.preventDefault();
+                if (isDisabled2) return;
                 setContextMenu({ x: e.clientX, y: e.clientY, nodeId: c.id });
               }}
               className={cn(
                 "flex h-7 w-full select-none items-center gap-2 px-3 text-xs transition-colors",
                 "text-zinc-500 hover:bg-zinc-800/50",
+                isDisabled2 ? "opacity-40" : null,
               )}
             >
               {rowGuides(depth + 1)}
@@ -409,15 +628,20 @@ export default function Workbench() {
             <button
               key={c.id}
               type="button"
-              onClick={() => setActiveFileId(c.id)}
+              onClick={() => {
+                if (isDisabled2) return;
+                setActiveFileId(c.id);
+              }}
               onContextMenu={(e) => {
                 e.preventDefault();
+                if (isDisabled2) return;
                 setContextMenu({ x: e.clientX, y: e.clientY, nodeId: c.id });
               }}
               aria-selected={isActive}
               className={cn(
                 "flex h-7 w-full cursor-pointer select-none items-center gap-2 px-3 text-xs transition-colors",
                 isActive ? "bg-zinc-800 text-white" : "text-zinc-500 hover:bg-zinc-800/50",
+                isDisabled2 ? "opacity-40" : null,
               )}
             >
               {rowGuides(depth + 1)}
@@ -440,27 +664,44 @@ export default function Workbench() {
     <div className="flex h-screen w-full overflow-hidden bg-[#121212] font-sans text-zinc-300 selection:bg-blue-500/30">
       <aside className="flex w-60 shrink-0 flex-col border-r border-zinc-800 bg-[#121212]">
         <div className="flex items-center justify-between p-3 px-4 text-[10px] font-bold uppercase tracking-wider text-zinc-600">
-          <span className="truncate">项目: {root.name}</span>
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="truncate">项目: {activeProject?.name ?? root.name}</span>
+            {activeProjectId ? (
+              <button
+                onClick={() => {
+                  setActiveProjectId(null);
+                  setActiveFileId(null);
+                  setDraft("");
+                }}
+                className="rounded-md px-2 py-1 text-[10px] font-medium text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
+                type="button"
+              >
+                返回 Root/
+              </button>
+            ) : null}
+          </div>
           <div className="flex items-center gap-1">
             <button
-              onClick={() => createFolder("root")}
+              onClick={() => createFolder(activeProjectId ?? "root")}
               className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
               type="button"
             >
               <Plus size={12} />
               文件夹
             </button>
-            <button
-              onClick={() => createMdFile("root")}
-              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
-              type="button"
-            >
-              <Plus size={12} />
-              MD
-            </button>
+            {activeProjectId ? (
+              <button
+                onClick={() => createMdFile(activeProjectId)}
+                className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
+                type="button"
+              >
+                <Plus size={12} />
+                MD
+              </button>
+            ) : null}
           </div>
         </div>
-        <div className="flex-1 overflow-y-auto py-1">{renderTree(root, 0)}</div>
+        <div className="flex-1 overflow-y-auto py-1">{renderTree(root, 0, null)}</div>
       </aside>
 
       <main className="flex min-w-0 flex-1 flex-col bg-[#0d0d0d]">
@@ -518,10 +759,17 @@ export default function Workbench() {
 
       <aside className="flex w-[380px] shrink-0 flex-col border-l border-zinc-800 bg-[#1c1c1c]">
         <div className="flex h-9 shrink-0 items-center justify-between border-b border-zinc-800 px-3 text-xs font-medium text-zinc-300">
-          <span>聊天</span>
+          <div className="flex items-center gap-2">
+            <span>聊天</span>
+            <span className="rounded bg-[#252525] px-2 py-0.5 text-[10px] text-zinc-500">{chatSaveStatus}</span>
+          </div>
           <button
             onClick={newConversation}
-            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200"
+            disabled={!activeProjectId}
+            className={cn(
+              "inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium",
+              activeProjectId ? "text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200" : "cursor-not-allowed text-zinc-600",
+            )}
             type="button"
           >
             <Plus size={12} />
@@ -537,7 +785,10 @@ export default function Workbench() {
               return (
                 <button
                   key={c.id}
-                  onClick={() => setActiveConversationId(c.id)}
+                  onClick={() => {
+                    if (!activeProjectId) return;
+                    setActiveConversationIdByProject((prev) => ({ ...prev, [activeProjectId]: c.id }));
+                  }}
                   className={cn(
                     "flex w-full items-center justify-between rounded-lg border px-2 py-1.5 text-left text-[12px] transition-colors",
                     isActive
@@ -555,7 +806,12 @@ export default function Workbench() {
         </div>
 
         <div className="flex-1 overflow-y-auto p-4">
-          <div className="space-y-4">
+          {!activeProjectId ? (
+            <div className="flex h-full items-center justify-center rounded-xl border border-zinc-800 bg-[#151515] p-6 text-sm text-zinc-500">
+              请选择 Root/ 下的一个项目文件夹后开始聊天。
+            </div>
+          ) : (
+            <div className="space-y-4">
             {activeConversation?.messages.map((m) => (
               <div
                 key={m.id}
@@ -590,7 +846,8 @@ export default function Workbench() {
                 </span>
               </div>
             </div>
-          </div>
+            </div>
+          )}
         </div>
 
         <div className="shrink-0 border-t border-zinc-800 bg-[#1c1c1c] p-4">
@@ -605,7 +862,11 @@ export default function Workbench() {
                   sendMessage();
                 }
               }}
-              className="w-full resize-none bg-transparent p-4 pb-12 text-[13px] text-zinc-100 outline-none placeholder:text-zinc-500"
+              disabled={!activeProjectId}
+              className={cn(
+                "w-full resize-none bg-transparent p-4 pb-12 text-[13px] outline-none placeholder:text-zinc-500",
+                activeProjectId ? "text-zinc-100" : "cursor-not-allowed text-zinc-600",
+              )}
               rows={3}
             />
             <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between">
@@ -630,7 +891,9 @@ export default function Workbench() {
                 onClick={sendMessage}
                 className={cn(
                   "flex h-8 w-8 items-center justify-center rounded-full transition-all",
-                  draft.trim() ? "scale-105 bg-zinc-100 text-black shadow-lg" : "bg-zinc-800 text-zinc-600",
+                  activeProjectId && draft.trim()
+                    ? "scale-105 bg-zinc-100 text-black shadow-lg"
+                    : "bg-zinc-800 text-zinc-600",
                 )}
                 type="button"
               >
@@ -651,6 +914,7 @@ export default function Workbench() {
             const found = findNode(root, contextMenu.nodeId);
             const nodeType = found?.node.type;
             const isRoot = contextMenu.nodeId === "root";
+            const isOutOfProject = !!activeProjectId && !nodeIsInActiveProject(contextMenu.nodeId);
 
             return (
               <>
@@ -666,15 +930,48 @@ export default function Workbench() {
                     >
                       新建文件夹 <Plus size={12} className="text-zinc-500" />
                     </button>
+                    {!isRoot ? (
+                      <button
+                        onClick={() => {
+                          setContextMenu(null);
+                          createMdFile(contextMenu.nodeId);
+                        }}
+                        className="flex w-full items-center justify-between px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800/60"
+                        type="button"
+                      >
+                        新建 md <FileText size={12} className="text-zinc-500" />
+                      </button>
+                    ) : null}
+                    {!isRoot ? (
+                      <>
+                        <div className="h-px bg-zinc-800" />
+                        <button
+                          onClick={() => {
+                            setContextMenu(null);
+                            exportFolderById(contextMenu.nodeId);
+                          }}
+                          className="flex w-full items-center justify-between px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800/60"
+                          type="button"
+                        >
+                          导出文件夹 <span className="text-zinc-500">↓</span>
+                        </button>
+                      </>
+                    ) : null}
+                    <div className="h-px bg-zinc-800" />
+                  </>
+                ) : null}
+
+                {nodeType === "file" ? (
+                  <>
                     <button
                       onClick={() => {
                         setContextMenu(null);
-                        createMdFile(contextMenu.nodeId);
+                        exportFileById(contextMenu.nodeId);
                       }}
                       className="flex w-full items-center justify-between px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800/60"
                       type="button"
                     >
-                      新建 md <FileText size={12} className="text-zinc-500" />
+                      导出文件 <span className="text-zinc-500">↓</span>
                     </button>
                     <div className="h-px bg-zinc-800" />
                   </>
@@ -686,7 +983,11 @@ export default function Workbench() {
                     if (found2) setRenaming({ nodeId: found2.node.id, value: found2.node.name });
                     setContextMenu(null);
                   }}
-                  className="flex w-full items-center justify-between px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800/60"
+                  disabled={isRoot || isOutOfProject}
+                  className={cn(
+                    "flex w-full items-center justify-between px-3 py-2 text-xs",
+                    isRoot || isOutOfProject ? "cursor-not-allowed text-zinc-600" : "text-zinc-300 hover:bg-zinc-800/60",
+                  )}
                   type="button"
                 >
                   重命名 <span className="text-zinc-500">F2</span>
@@ -697,10 +998,10 @@ export default function Workbench() {
                     if (!isRoot) startMove(contextMenu.nodeId);
                     setContextMenu(null);
                   }}
-                  disabled={isRoot}
+                  disabled={isRoot || isOutOfProject}
                   className={cn(
                     "flex w-full items-center justify-between px-3 py-2 text-xs",
-                    isRoot ? "cursor-not-allowed text-zinc-600" : "text-zinc-300 hover:bg-zinc-800/60",
+                    isRoot || isOutOfProject ? "cursor-not-allowed text-zinc-600" : "text-zinc-300 hover:bg-zinc-800/60",
                   )}
                   type="button"
                 >
@@ -714,10 +1015,10 @@ export default function Workbench() {
                     if (!isRoot) deleteNodeById(contextMenu.nodeId);
                     setContextMenu(null);
                   }}
-                  disabled={isRoot}
+                  disabled={isRoot || isOutOfProject}
                   className={cn(
                     "flex w-full items-center justify-between px-3 py-2 text-xs",
-                    isRoot ? "cursor-not-allowed text-zinc-600" : "text-rose-300 hover:bg-rose-500/10",
+                    isRoot || isOutOfProject ? "cursor-not-allowed text-zinc-600" : "text-rose-300 hover:bg-rose-500/10",
                   )}
                   type="button"
                 >
@@ -788,4 +1089,3 @@ export default function Workbench() {
     </div>
   );
 }
-
