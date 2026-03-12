@@ -210,6 +210,8 @@ function recoverOrphans(root: FsNode): FsNode {
 }
 
 import type { UserSettingsRow } from "@/types/settings";
+import type { MeonRegistryConfig, ChatModelDefinition } from "@/types/meon-config";
+import { getActiveChatModelConfig } from "@/utils/model-config";
 
 export default function Workbench({ user }: { user?: UserSettingsRow }) {
   const [root, setRoot] = useState<FsNode>(() => defaultRoot());
@@ -225,6 +227,42 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
   const [activeConversationIdByProject, setActiveConversationIdByProject] = useState<Record<string, string | null>>({});
   const [draft, setDraft] = useState("");
   const [chatSaveStatus, setChatSaveStatus] = useState("已保存");
+
+  const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
+  const [isModelSelectorOpen, setIsModelSelectorOpen] = useState(false);
+  const modelSelectorRef = useRef<HTMLDivElement>(null);
+
+  const chatModels = useMemo(() => {
+    if (!user?.registry_config) return [];
+    const config = user.registry_config as unknown as MeonRegistryConfig;
+    return (config.models || []).filter((m: any) => m.type === "chat" && m.isEnabled) as ChatModelDefinition[];
+  }, [user]);
+
+  const currentModelName = useMemo(() => {
+    if (!selectedModelId) return "选择模型";
+    const found = chatModels.find(m => m.id === selectedModelId);
+    return found ? found.name : selectedModelId;
+  }, [selectedModelId, chatModels]);
+
+  useEffect(() => {
+    if (user?.registry_config) {
+      const config = user.registry_config as unknown as MeonRegistryConfig;
+      if (config.activeModels?.chat) {
+        setSelectedModelId(config.activeModels.chat);
+      }
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (!isModelSelectorOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (modelSelectorRef.current && !modelSelectorRef.current.contains(e.target as Node)) {
+        setIsModelSelectorOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onClick);
+    return () => window.removeEventListener("mousedown", onClick);
+  }, [isModelSelectorOpen]);
 
   useEffect(() => {
     const raw = window.localStorage.getItem("meon:fs:v1");
@@ -981,13 +1019,46 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
                   Agent
                   <ChevronDown size={10} />
                 </button>
-                <button
-                  className="flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium text-zinc-500 hover:text-zinc-300"
-                  type="button"
-                >
-                  Composer 1.5
-                  <ChevronDown size={10} />
-                </button>
+                <div className="relative" ref={modelSelectorRef}>
+                  <button
+                    onClick={() => setIsModelSelectorOpen(!isModelSelectorOpen)}
+                    className="flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium text-zinc-500 hover:text-zinc-300"
+                    type="button"
+                  >
+                    {currentModelName}
+                    <ChevronDown size={10} className={cn("transition-transform", isModelSelectorOpen ? "rotate-180" : "")} />
+                  </button>
+                  
+                  {isModelSelectorOpen && (
+                    <div className="absolute bottom-full left-0 mb-2 w-48 overflow-hidden rounded-lg border border-zinc-800 bg-[#1e1e1e] shadow-xl">
+                      <div className="p-1">
+                        {chatModels.length === 0 ? (
+                          <div className="px-3 py-2 text-xs text-zinc-500">无可用模型</div>
+                        ) : (
+                          chatModels.map(model => (
+                            <button
+                              key={model.id}
+                              onClick={() => {
+                                setSelectedModelId(model.id);
+                                setIsModelSelectorOpen(false);
+                              }}
+                              className={cn(
+                                "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+                                model.id === selectedModelId
+                                  ? "bg-zinc-800 text-zinc-200"
+                                  : "text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-300"
+                              )}
+                              type="button"
+                            >
+                              <span className="truncate">{model.name}</span>
+                              {model.id === selectedModelId && <div className="h-1.5 w-1.5 rounded-full bg-blue-500" />}
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
               <button
                 onClick={sendMessage}
