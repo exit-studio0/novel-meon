@@ -8,7 +8,10 @@ import {
   Trash2,
   RotateCcw,
   FileText,
-  Eye
+  Eye,
+  EyeOff,
+  Copy,
+  Check
 } from 'lucide-react';
 import { findOrphanIds, type FsNode } from './workbench';
 
@@ -19,6 +22,46 @@ interface SettingsModalProps {
   onRecover?: (id: string) => void;
   onDeleteOrphan?: (id: string) => void;
 }
+
+const ApiKeyDisplay = ({ apiKey }: { apiKey: string }) => {
+  const [showKey, setShowKey] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(apiKey);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="flex items-center justify-between gap-2 px-3 py-2 rounded bg-neutral-950 border border-neutral-800">
+      <div className="text-xs text-neutral-400 font-mono truncate select-all flex-1">
+        {showKey ? apiKey : (
+          <span className="flex items-center gap-1">
+            {apiKey.slice(0, 3)}••••••••••••••••{apiKey.slice(-4)}
+            <span className="text-neutral-600 ml-1 hidden sm:inline">(已配置)</span>
+          </span>
+        )}
+      </div>
+      <div className="flex items-center gap-1 shrink-0">
+        <button
+          onClick={() => setShowKey(!showKey)}
+          className="p-1.5 rounded hover:bg-neutral-800 text-neutral-500 hover:text-neutral-300 transition-colors"
+          title={showKey ? "隐藏" : "显示"}
+        >
+          {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
+        </button>
+        <button
+          onClick={handleCopy}
+          className="p-1.5 rounded hover:bg-neutral-800 text-neutral-500 hover:text-neutral-300 transition-colors"
+          title="复制"
+        >
+          {copied ? <Check size={14} className="text-green-500" /> : <Copy size={14} />}
+        </button>
+      </div>
+    </div>
+  );
+};
 
 export const SettingsModal = ({ onClose, user, root, onRecover, onDeleteOrphan }: SettingsModalProps) => {
   const [activeTab, setActiveTab] = useState('account');
@@ -136,7 +179,12 @@ export const SettingsModal = ({ onClose, user, root, onRecover, onDeleteOrphan }
                       </div>
                       
                       <div className="space-y-4">
-                        {(user?.registry_config?.providers || []).map((provider: any) => (
+                        {(user?.registry_config?.providers || [])
+                          .filter((p: any) => 
+                            (user?.registry_config?.models || [])
+                              .some((m: any) => m.providerId === p.id && m.type === 'chat')
+                          )
+                          .map((provider: any) => (
                           <div key={provider.id} className="p-4 rounded-lg bg-neutral-900 border border-neutral-800">
                             <div className="flex items-center justify-between mb-3">
                               <div className="flex items-center gap-2">
@@ -159,16 +207,13 @@ export const SettingsModal = ({ onClose, user, root, onRecover, onDeleteOrphan }
                               </div>
                               <div>
                                 <label className="block text-xs text-neutral-500 mb-1.5">API Key</label>
-                                <div className="px-3 py-2 rounded bg-neutral-950 border border-neutral-800 text-xs text-neutral-400 font-mono truncate">
-                                  {provider.apiKey ? (
-                                    <span className="flex items-center gap-1">
-                                      sk-••••••••••••••••
-                                      <span className="text-neutral-600 ml-1">(已配置)</span>
-                                    </span>
-                                  ) : (
-                                    <span className="text-neutral-600 italic">未配置</span>
-                                  )}
-                                </div>
+                                {provider.apiKey ? (
+                                  <ApiKeyDisplay apiKey={provider.apiKey} />
+                                ) : (
+                                  <div className="px-3 py-2 rounded bg-neutral-950 border border-neutral-800 text-xs text-neutral-600 italic">
+                                    未配置
+                                  </div>
+                                )}
                               </div>
                             </div>
                           </div>
