@@ -5,9 +5,12 @@ import TailwindAdvancedEditor from "@/components/tailwind/advanced-editor";
 import {
   ArrowUp,
   ChevronDown,
+  ChevronLeft,
   FileCode,
+  FilePlus,
   FileText,
   Folder,
+  FolderPlus,
   MessageSquare,
   Plus,
   Search,
@@ -673,30 +676,31 @@ export default function Workbench() {
                   setActiveFileId(null);
                   setDraft("");
                 }}
-                className="rounded-md px-2 py-1 text-[10px] font-medium text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
+                className="rounded-md px-1 py-1 text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
                 type="button"
+                title="返回 Root/"
               >
-                返回 Root/
+                <ChevronLeft size={14} />
               </button>
             ) : null}
           </div>
           <div className="flex items-center gap-1">
             <button
               onClick={() => createFolder(activeProjectId ?? "root")}
-              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
+              className="inline-flex items-center gap-1 rounded-md px-1 py-1 text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
               type="button"
+              title="新建文件夹"
             >
-              <Plus size={12} />
-              文件夹
+              <FolderPlus size={14} />
             </button>
             {activeProjectId ? (
               <button
                 onClick={() => createMdFile(activeProjectId)}
-                className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
+                className="inline-flex items-center gap-1 rounded-md px-1 py-1 text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
                 type="button"
+                title="新建 MD"
               >
-                <Plus size={12} />
-                MD
+                <FilePlus size={14} />
               </button>
             ) : null}
           </div>
