@@ -1,4 +1,4 @@
-import { ChatModelDefinition, MeonRegistryConfig } from "@/types/meon-config";
+import type { ChatModelDefinition, MeonRegistryConfig } from "@/types/meon-config";
 
 /** 
  * 获取当前激活的文字模型配置 
