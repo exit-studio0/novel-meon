@@ -15,7 +15,6 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import Markdown from "react-markdown";
 
 type FsNodeType = "folder" | "file";
 
@@ -139,7 +138,6 @@ export default function Workbench() {
   const [root, setRoot] = useState<FsNode>(() => defaultRoot());
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["root"]));
   const [activeFileId, setActiveFileId] = useState<string | null>(null);
-  const [previewMarkdown, setPreviewMarkdown] = useState("");
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [renaming, setRenaming] = useState<{ nodeId: string; value: string } | null>(null);
   const [moveTarget, setMoveTarget] = useState<{ nodeId: string; targetFolderId: string } | null>(null);
@@ -199,15 +197,6 @@ export default function Workbench() {
       window.removeEventListener("keydown", onEscape);
     };
   }, [contextMenu]);
-
-  useEffect(() => {
-    if (!activeStorageKey) {
-      setPreviewMarkdown("");
-      return;
-    }
-    const existing = window.localStorage.getItem(`${activeStorageKey}:markdown`);
-    setPreviewMarkdown(existing ?? "");
-  }, [activeStorageKey]);
 
   useEffect(() => {
     if (!renaming) return;
@@ -508,55 +497,14 @@ export default function Workbench() {
 
         <div className="flex-1 overflow-hidden">
           {activeFile?.type === "file" && activeStorageKey ? (
-            <div className="flex h-full">
-              <div className="flex w-1/2 min-w-0 flex-col border-r border-zinc-800">
-                <div className="shrink-0 border-b border-zinc-800 bg-[#121212] px-4 py-2 text-xs text-zinc-500">
-                  编辑
-                </div>
-                <div className="flex-1 overflow-auto p-4">
-                  <TailwindAdvancedEditor
-                    key={activeStorageKey}
-                    storageKey={activeStorageKey}
-                    onMarkdownChange={setPreviewMarkdown}
-                    wrapperClassName="max-w-none"
-                    editorClassName="max-w-none sm:mb-0 sm:rounded-none sm:border-0 sm:shadow-none"
-                  />
-                </div>
-              </div>
-
-              <div className="flex w-1/2 min-w-0 flex-col">
-                <div className="shrink-0 border-b border-zinc-800 bg-[#121212] px-4 py-2 text-xs text-zinc-500">
-                  实时预览
-                </div>
-                <div className="flex-1 overflow-auto p-4">
-                  <div className="prose prose-sm max-w-none prose-invert">
-                    <Markdown
-                      components={{
-                        code(props) {
-                          const { className, children } = props as { className?: string; children?: unknown };
-                          const inline = (props as { inline?: boolean }).inline;
-                          const text = String(children ?? "").replace(/\n$/, "");
-                          if (inline) return <code className={className}>{children as string}</code>;
-                          const match = /language-(\w+)/.exec(className ?? "");
-                          if (!match) {
-                            return (
-                              <pre className="rounded-md bg-black/40 p-3">
-                                <code>{text}</code>
-                              </pre>
-                            );
-                          }
-                          return (
-                            <pre className="rounded-md bg-black/40 p-3">
-                              <code className={className}>{text}</code>
-                            </pre>
-                          );
-                        },
-                      }}
-                    >
-                      {previewMarkdown}
-                    </Markdown>
-                  </div>
-                </div>
+            <div className="flex h-full min-w-0 flex-col">
+              <div className="flex-1 min-w-0 overflow-auto p-4">
+                <TailwindAdvancedEditor
+                  key={activeStorageKey}
+                  storageKey={activeStorageKey}
+                  wrapperClassName="max-w-none"
+                  editorClassName="max-w-none sm:mb-0 sm:rounded-none sm:border-0 sm:shadow-none bg-transparent"
+                />
               </div>
             </div>
           ) : (
