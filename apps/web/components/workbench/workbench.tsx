@@ -14,10 +14,12 @@ import {
   MessageSquare,
   Plus,
   Search,
+  Settings,
   Sparkles,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { SettingsModal } from "@/components/workbench/settings-modal";
 
 type FsNodeType = "folder" | "file";
 
@@ -232,6 +234,8 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
   const [isModelSelectorOpen, setIsModelSelectorOpen] = useState(false);
   const modelSelectorRef = useRef<HTMLDivElement>(null);
 
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
   const chatModels = useMemo(() => {
     if (!user?.registry_config) return [];
     const config = user.registry_config as unknown as MeonRegistryConfig;
@@ -273,7 +277,9 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
         if (parsed?.id === "root") loaded = parsed;
       } catch {}
     }
-    setRoot(recoverOrphans(loaded));
+    // setRoot(recoverOrphans(loaded));
+    // 禁用自动恢复功能，以避免显示 "恢复的文件" 文件夹
+    setRoot(loaded);
     setIsLoaded(true);
   }, []);
 
@@ -780,6 +786,10 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
     );
   };
 
+  const handleRecoverFiles = () => {
+    setRoot((prev) => recoverOrphans(prev));
+  };
+
   return (
     <div className="flex h-screen w-full overflow-hidden bg-[#121212] font-sans text-zinc-300 selection:bg-blue-500/30">
       <aside className="flex w-60 shrink-0 flex-col border-r border-zinc-800 bg-[#121212]">
@@ -831,7 +841,7 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
               <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-600/20 text-xs font-medium text-blue-400">
                 {user.email?.slice(0, 2).toUpperCase() || 'U'}
               </div>
-              <div className="flex min-w-0 flex-col justify-center">
+              <div className="flex min-w-0 flex-1 flex-col justify-center">
                 <span className="truncate text-xs font-medium text-zinc-300">
                   {user.user_metadata?.full_name || user.user_metadata?.name || user.email?.split('@')[0] || 'User'}
                 </span>
@@ -839,10 +849,26 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
                   {user.email}
                 </span>
               </div>
+              <button
+                onClick={() => setIsSettingsOpen(true)}
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
+                title="设置"
+                type="button"
+              >
+                <Settings size={14} />
+              </button>
             </div>
           </div>
         )}
       </aside>
+
+      {isSettingsOpen && (
+        <SettingsModal
+          onClose={() => setIsSettingsOpen(false)}
+          user={user}
+          onRecoverFiles={handleRecoverFiles}
+        />
+      )}
 
       <main className="flex min-w-0 flex-1 flex-col bg-[#0d0d0d]">
         <div className="flex h-9 shrink-0 items-center overflow-x-auto border-b border-zinc-800 bg-[#121212]">
