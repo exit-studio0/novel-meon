@@ -209,7 +209,7 @@ function recoverOrphans(root: FsNode): FsNode {
   return currentRoot;
 }
 
-import { UserSettingsRow } from "@/types/settings";
+import type { UserSettingsRow } from "@/types/settings";
 
 export default function Workbench({ user }: { user?: UserSettingsRow }) {
   const [root, setRoot] = useState<FsNode>(() => defaultRoot());
