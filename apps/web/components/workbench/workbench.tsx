@@ -54,11 +54,20 @@ type ConversationMessage = {
   question?: UserQuestionPayload;
 };
 
+type AiTodoStatus = "pending" | "in_progress" | "completed";
+
+type AiTodoItem = {
+  id: string;
+  content: string;
+  status: AiTodoStatus;
+};
+
 type Conversation = {
   id: string;
   title: string;
   createdAt: number;
   messages: ConversationMessage[];
+  aiTodos?: AiTodoItem[];
 };
 
 type ContextMenuState = { x: number; y: number; nodeId: string } | null;
@@ -250,6 +259,9 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
   const [activeConversationIdByProject, setActiveConversationIdByProject] = useState<Record<string, string | null>>({});
   const [draft, setDraft] = useState("");
   const [chatSaveStatus, setChatSaveStatus] = useState("已保存");
+  const [chatCaret, setChatCaret] = useState(0);
+  const [commandActiveIndex, setCommandActiveIndex] = useState(0);
+  const [dismissedCommandToken, setDismissedCommandToken] = useState<string | null>(null);
 
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [isModelSelectorOpen, setIsModelSelectorOpen] = useState(false);
@@ -362,6 +374,9 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const didHydrateChatRef = useRef(false);
   const chatPersistTimerRef = useRef<number | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const pendingWriteConfirmRef = useRef<{ episode: number } | null>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     const fromLocalStorageRaw = window.localStorage.getItem("meon:chat:v1");
@@ -977,6 +992,16 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
   const [questionAnswered, setQuestionAnswered] = useState<Record<string, boolean>>({});
   const [questionTextInputs, setQuestionTextInputs] = useState<Record<string, string>>({});
 
+  const activeConversationTodos = useMemo(() => {
+    return activeConversation?.aiTodos ?? [];
+  }, [activeConversation?.aiTodos]);
+
+  const stopGenerating = () => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setIsGenerating(false);
+  };
+
   // --- File System Capabilities ---
   const checkFileAccess = (path: string, type: FileActionType = "read") => {
     const normalized = path.replace(/\\/g, "/").replace(/^\.\//, "");
@@ -1100,6 +1125,623 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
     return "Error: Unknown action.";
   };
 
+  type DramaCommand =
+    | { kind: "character" }
+    | { kind: "catalog" }
+    | { kind: "write"; episode: number; force?: boolean }
+    | { kind: "compress" }
+    | { kind: "checkAll" }
+    | { kind: "recordNow" };
+
+  const parseDramaCommand = (raw: string): DramaCommand | null => {
+    const t = raw.trim();
+    if (!t.startsWith("/")) return null;
+    const parts = t.split(/\s+/).filter(Boolean);
+    const cmd = parts[0]?.toLowerCase();
+    if (cmd === "/character") return { kind: "character" };
+    if (cmd === "/catalog") return { kind: "catalog" };
+    if (cmd === "/compress") return { kind: "compress" };
+    if (cmd === "/check" && parts[1]?.toLowerCase() === "all") return { kind: "checkAll" };
+    if (cmd === "/record") return { kind: parts[1]?.toLowerCase() === "now" ? "recordNow" : "recordNow" };
+    if (cmd === "/write") {
+      const nRaw = parts[1];
+      const n = nRaw ? Number.parseInt(nRaw, 10) : NaN;
+      if (!Number.isFinite(n) || n <= 0) return null;
+      const force = parts.some((p) => p === "--force" || p === "-f" || p === "!" || p.toLowerCase() === "force");
+      return { kind: "write", episode: n, force };
+    }
+    return null;
+  };
+
+  const formatEpisodeFile = (episode: number) => `EP-${String(episode).padStart(2, "0")}.md`;
+
+  const commandCatalog = useMemo(
+    () =>
+      [
+        { title: "/character", insert: "/character", description: "生成人物小传（需要 outline.md）" },
+        { title: "/catalog", insert: "/catalog", description: "生成分集目录（需要 outline.md + character.md）" },
+        { title: "/write", insert: "/write 1", description: "生成指定集数（例如 /write 12）" },
+        { title: "/check all", insert: "/check all", description: "全量一致性检查（最近10集）" },
+        { title: "/record now", insert: "/record now", description: "立即更新 script.progress.md" },
+        { title: "/compress", insert: "/compress", description: "生成 context.summary.md" },
+      ] as const,
+    [],
+  );
+
+  const commandHint = useMemo(() => {
+    if (!activeProjectId || isGenerating) return null;
+    const caret = Math.max(0, Math.min(chatCaret, draft.length));
+    const before = draft.slice(0, caret);
+    if (before.includes("\n")) return null;
+    if (!before.startsWith("/")) return null;
+    const token = before.trim();
+    if (!token.startsWith("/")) return null;
+    const tokenPrefix = token.split(/\s+/)[0] ?? "/";
+    if (dismissedCommandToken && dismissedCommandToken === tokenPrefix) return null;
+    const q = tokenPrefix.toLowerCase();
+    const items = commandCatalog.filter((c) => c.title.toLowerCase().startsWith(q));
+    if (items.length === 0) return null;
+    const start = before.length - tokenPrefix.length;
+    const end = before.length;
+    return { tokenPrefix, items, replace: { start, end } };
+  }, [activeProjectId, isGenerating, chatCaret, draft, dismissedCommandToken, commandCatalog]);
+
+  useEffect(() => {
+    if (!commandHint) {
+      setCommandActiveIndex(0);
+      return;
+    }
+    setDismissedCommandToken((prev) => (prev === commandHint.tokenPrefix ? prev : null));
+    setCommandActiveIndex((prev) => {
+      const max = commandHint.items.length - 1;
+      return Math.max(0, Math.min(prev, max));
+    });
+  }, [commandHint]);
+
+  const applyCommandHint = (insert: string) => {
+    if (!commandHint) return;
+    const next = draft.slice(0, commandHint.replace.start) + insert + draft.slice(commandHint.replace.end);
+    setDraft(next);
+    setDismissedCommandToken(null);
+    const nextCaret = commandHint.replace.start + insert.length;
+    setChatCaret(nextCaret);
+    window.requestAnimationFrame(() => {
+      const el = chatInputRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(nextCaret, nextCaret);
+    });
+  };
+
+  const getMarkdownByPath = (path: string) => {
+    if (!activeProjectId) return null;
+    const normalizedPath = path.replace(/\\/g, "/").replace(/^\.\//, "");
+    const parts = normalizedPath.split("/").filter((p) => p && p !== ".");
+    if (parts.length === 0) return null;
+    const projectRoot = findNode(root, activeProjectId)?.node;
+    if (!projectRoot) return null;
+    let targetNode = projectRoot;
+    for (const part of parts) {
+      const child = targetNode.children?.find((c) => c.name === part);
+      if (!child) return null;
+      targetNode = child;
+    }
+    if (targetNode.type !== "file") return null;
+    const key = `fs:${targetNode.id}`;
+    return window.localStorage.getItem(`${key}:markdown`) ?? "";
+  };
+
+  const listEpisodeMarkdowns = () => {
+    if (!activeProjectId) return [];
+    const projectRoot = findNode(root, activeProjectId)?.node;
+    if (!projectRoot) return [];
+    const episodesFolder = projectRoot.children?.find((c) => c.type === "folder" && c.name === "episodes");
+    if (!episodesFolder || episodesFolder.type !== "folder") return [];
+    const files = (episodesFolder.children ?? [])
+      .filter((c) => c.type === "file" && /^EP-\d{2,}\.md$/i.test(c.name))
+      .map((f) => ({ id: f.id, name: f.name }));
+    const withNum = files
+      .map((f) => {
+        const m = f.name.match(/^EP-(\d+)\.md$/i);
+        const n = m ? Number.parseInt(m[1], 10) : Number.NaN;
+        return { ...f, n };
+      })
+      .filter((x) => Number.isFinite(x.n));
+    withNum.sort((a, b) => b.n - a.n);
+    return withNum.map((f) => ({ path: `episodes/${f.name}`, markdown: getMarkdownByPath(`episodes/${f.name}`) ?? "" }));
+  };
+
+  const callChatStream = async (
+    requestConfig: { baseUrl: string; apiKey: string; modelName: string; params?: any },
+    messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+    signal: AbortSignal,
+    onDelta?: (delta: string, full: string) => void,
+  ) => {
+    const response = await fetch(`${requestConfig.baseUrl}/chat/completions`, {
+      method: "POST",
+      signal,
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${requestConfig.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: requestConfig.modelName,
+        messages,
+        stream: true,
+        ...(requestConfig.params ?? {}),
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`API Error: ${response.status} - ${errText}`);
+    }
+    if (!response.body) throw new Error("No response body");
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullContent = "";
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      buffer += chunk;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (trimmed === "data: [DONE]") continue;
+        if (!trimmed.startsWith("data: ")) continue;
+        try {
+          const jsonStr = trimmed.slice(6);
+          const json = JSON.parse(jsonStr);
+          const delta = json.choices[0]?.delta?.content || "";
+          if (!delta) continue;
+          fullContent += delta;
+          onDelta?.(delta, fullContent);
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    return fullContent;
+  };
+
+  const extractAlignerStatus = (raw: string) => {
+    const t = raw.trim();
+    const hasFail = /(^|\W)FAIL(\W|$)/i.test(t) || t.includes("❌") || t.includes("检查未通过");
+    const hasPass = /(^|\W)PASS(\W|$)/i.test(t) || t.includes("✅") || t.includes("检查通过");
+    if (hasFail && !hasPass) return "FAIL" as const;
+    if (hasPass && !hasFail) return "PASS" as const;
+    if (hasFail) return "FAIL" as const;
+    if (hasPass) return "PASS" as const;
+    return "FAIL" as const;
+  };
+
+  const runRecorderUpdate = async (
+    requestConfig: { baseUrl: string; apiKey: string; modelName: string; params?: any },
+    signal: AbortSignal,
+    changed: Array<{ path: string; markdown: string }>,
+  ) => {
+    const recorder = getMarkdownByPath("agent-settings/script-recorder.md")?.trim();
+    if (!recorder) return null;
+    const outline = getMarkdownByPath("outline.md") ?? "";
+    const character = getMarkdownByPath("character.md") ?? "";
+    const episodeIndex = getMarkdownByPath("episode_index.md") ?? "";
+    const prevProgress = getMarkdownByPath("script.progress.md") ?? "";
+
+    const userPayload = [
+      "请基于以下项目文档与本次变更，输出 script.progress.md 的完整内容（markdown），不要使用```包裹，不要输出任何 XML 标签。",
+      "",
+      "【本次变更】",
+      ...changed.map((c) => `- ${c.path}`),
+      "",
+      "【outline.md】",
+      outline ? outline : "(空)",
+      "",
+      "【character.md】",
+      character ? character : "(空)",
+      "",
+      "【episode_index.md】",
+      episodeIndex ? episodeIndex : "(空)",
+      "",
+      "【script.progress.md（旧）】",
+      prevProgress ? prevProgress : "(空)",
+      "",
+      ...changed.flatMap((c) => ["", `【${c.path}（新）】`, c.markdown ? c.markdown : "(空)"]),
+    ].join("\n");
+
+    const content = await callChatStream(
+      requestConfig,
+      [
+        { role: "system", content: recorder },
+        { role: "user", content: userPayload },
+      ],
+      signal,
+    );
+    return content.trim();
+  };
+
+  const runDramaCommand = async (
+    cmd: DramaCommand,
+    requestConfig: { baseUrl: string; apiKey: string; modelName: string; params?: any },
+    signal: AbortSignal,
+    assistantMsgId: string,
+  ) => {
+    if (!activeProjectId || !activeConversationId) return;
+
+    const setAssistant = (text: string) => {
+      setProjectConversations((prev) => ({
+        ...prev,
+        [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
+          if (c.id !== activeConversationId) return c;
+          return { ...c, messages: c.messages.map((m) => (m.id === assistantMsgId ? { ...m, content: text } : m)) };
+        }),
+      }));
+    };
+
+    const addQuestion = (q: UserQuestionPayload) => {
+      const msg: ConversationMessage = {
+        id: uid("m"),
+        role: "assistant",
+        content: "",
+        question: q,
+      };
+      setProjectConversations((prev) => ({
+        ...prev,
+        [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
+          if (c.id !== activeConversationId) return c;
+          return { ...c, messages: [...c.messages, msg] };
+        }),
+      }));
+    };
+
+    const mainAgent = getMarkdownByPath("agent-settings/main-agent.md")?.trim();
+    const mainAgentCh = getMarkdownByPath("agent-settings/main-agentch.md")?.trim();
+    const aligner = getMarkdownByPath("agent-settings/script-aligner.md")?.trim();
+    if (!mainAgent || !mainAgentCh || !aligner) {
+      setAssistant("Error: 缺少 agent-settings 配置文件，请新建项目或检查 agent-settings 文件夹。");
+      return;
+    }
+
+    const outline = getMarkdownByPath("outline.md") ?? "";
+    const character = getMarkdownByPath("character.md") ?? "";
+    const episodeIndex = getMarkdownByPath("episode_index.md") ?? "";
+
+    const systemMain = [
+      mainAgentCh,
+      "",
+      mainAgent,
+      "",
+      "输出约束：",
+      "- 必须使用中文",
+      "- 只输出目标文档的完整 markdown 内容",
+      "- 不要输出```代码块，不要输出任何 <file_action> / <todo_action> / <user_question> 标签",
+    ].join("\n");
+
+    const systemAligner = [
+      aligner,
+      "",
+      "输出约束：",
+      "- 返回必须简洁、结构化，便于解析",
+      "- 必须明确给出 PASS 或 FAIL",
+      "- 若 FAIL：每条问题给出最小可行修改示例，并标注影响范围与优先级",
+      "- 不要输出```代码块，不要输出任何 XML 标签",
+    ].join("\n");
+
+    const generateAndCheck = async (
+      targetPath: string,
+      buildMainUser: () => string,
+      buildAlignerUser: (draft: string) => string,
+    ) => {
+      let draft = "";
+      setAssistant("正在创作初稿…");
+      draft = await callChatStream(requestConfig, [{ role: "system", content: systemMain }, { role: "user", content: buildMainUser() }], signal);
+      draft = draft.trim();
+
+      for (let i = 1; i <= 8; i++) {
+        setAssistant(i === 1 ? "正在进行一致性检查…" : `正在按反馈修订并复检…（第 ${i} 轮）`);
+        const report = await callChatStream(
+          requestConfig,
+          [{ role: "system", content: systemAligner }, { role: "user", content: buildAlignerUser(draft) }],
+          signal,
+        );
+        const status = extractAlignerStatus(report);
+        if (status === "PASS") {
+          const writeResult = executeFsAction("write", targetPath, draft);
+          if (writeResult.startsWith("Error:")) {
+            setAssistant(`写入失败：${writeResult}`);
+            return { ok: false, report, draft };
+          }
+
+          const progress = await runRecorderUpdate(requestConfig, signal, [{ path: targetPath, markdown: draft }]);
+          if (progress) {
+            const progressWrite = executeFsAction("write", "script.progress.md", progress);
+            if (progressWrite.startsWith("Error:")) {
+              setAssistant(`已写入 ${targetPath}，但更新 script.progress.md 失败：${progressWrite}`);
+              return { ok: true, report, draft };
+            }
+          }
+
+          setAssistant(`已写入 ${targetPath}，并更新 script.progress.md。`);
+          return { ok: true, report, draft };
+        }
+
+        if (i >= 8) {
+          setAssistant(`检查未通过，已达到最大修订次数。\n\n${report.trim()}`);
+          return { ok: false, report, draft };
+        }
+
+        draft = await callChatStream(
+          requestConfig,
+          [
+            { role: "system", content: systemMain },
+            {
+              role: "user",
+              content: [
+                "根据以下 script-aligner 的反馈修订目标文档，并重新输出目标文档完整 markdown 内容（不要输出其他内容）。",
+                "",
+                "【检查反馈】",
+                report.trim(),
+                "",
+                "【当前草稿】",
+                draft.trim(),
+              ].join("\n"),
+            },
+          ],
+          signal,
+        );
+        draft = draft.trim();
+      }
+
+      return { ok: false, report: "", draft };
+    };
+
+    if (cmd.kind === "character") {
+      if (!outline.trim()) {
+        setAssistant("outline.md 为空。请先完成大纲（生成并写入 outline.md），再运行 /character。");
+        return;
+      }
+      await generateAndCheck(
+        "character.md",
+        () =>
+          [
+            "请基于 outline.md 生成 character.md（人物小传+分类）。",
+            "要求：主角/反派/关键配角/群像分别成节；每人包含：标签、背景、动机、欲望、弱点、与主角关系、关键转折（可涉及集数）。",
+            "",
+            "【outline.md】",
+            outline.trim(),
+            "",
+            "【character.md（旧）】",
+            character.trim() ? character.trim() : "(空)",
+          ].join("\n"),
+        (draft) =>
+          [
+            "请检查将要写入的 character.md 是否符合短剧创作法则与项目一致性。",
+            "",
+            "【outline.md】",
+            outline.trim(),
+            "",
+            "【character.md（旧）】",
+            character.trim() ? character.trim() : "(空)",
+            "",
+            "【character.md（新草稿）】",
+            draft.trim(),
+          ].join("\n"),
+      );
+      return;
+    }
+
+    if (cmd.kind === "catalog") {
+      if (!outline.trim()) {
+        setAssistant("outline.md 为空。请先完成大纲（生成并写入 outline.md），再运行 /catalog。");
+        return;
+      }
+      if (!character.trim()) {
+        setAssistant("character.md 为空。请先运行 /character 生成人物小传，再运行 /catalog。");
+        return;
+      }
+      await generateAndCheck(
+        "episode_index.md",
+        () =>
+          [
+            "请基于 outline.md 与 character.md 生成 episode_index.md（分集目录/每集框架）。",
+            "要求：每集给出：集号、标题、场景数（1-3）、核心冲突、爽点/虐点、反转/钩子、关键人物出场。",
+            "注意：第1集必须强钩子；每2-3集小高潮；第20集附近设置付费节点（如适用）。",
+            "",
+            "【outline.md】",
+            outline.trim(),
+            "",
+            "【character.md】",
+            character.trim(),
+            "",
+            "【episode_index.md（旧）】",
+            episodeIndex.trim() ? episodeIndex.trim() : "(空)",
+          ].join("\n"),
+        (draft) =>
+          [
+            "请检查将要写入的 episode_index.md 是否符合短剧节奏/爽点分布/人物一致性，并与 outline.md、character.md 对齐。",
+            "",
+            "【outline.md】",
+            outline.trim(),
+            "",
+            "【character.md】",
+            character.trim(),
+            "",
+            "【episode_index.md（旧）】",
+            episodeIndex.trim() ? episodeIndex.trim() : "(空)",
+            "",
+            "【episode_index.md（新草稿）】",
+            draft.trim(),
+          ].join("\n"),
+      );
+      return;
+    }
+
+    if (cmd.kind === "write") {
+      if (!outline.trim()) {
+        setAssistant("outline.md 为空。请先完成大纲（生成并写入 outline.md），再运行 /write [集数]。");
+        return;
+      }
+      if (!character.trim()) {
+        setAssistant("character.md 为空。请先运行 /character 生成人物小传，再运行 /write [集数]。");
+        return;
+      }
+      if (!episodeIndex.trim()) {
+        setAssistant("episode_index.md 为空。请先运行 /catalog 生成分集目录，再运行 /write [集数]。");
+        return;
+      }
+
+      const fileName = formatEpisodeFile(cmd.episode);
+      const targetPath = `episodes/${fileName}`;
+      const existing = getMarkdownByPath(targetPath) ?? "";
+      if (existing.trim() && !cmd.force) {
+        pendingWriteConfirmRef.current = { episode: cmd.episode };
+        setAssistant(`${fileName} 已存在，需要确认是否覆盖。`);
+        addQuestion({
+          header: "覆盖确认",
+          question: `${fileName} 已存在，是否覆盖？`,
+          kind: "options",
+          options: [
+            { label: "覆盖", description: "重新生成并覆盖现有内容" },
+            { label: "取消", description: "保持现有内容不变" },
+          ],
+          multiSelect: false,
+        });
+        return;
+      }
+
+      pendingWriteConfirmRef.current = null;
+      const latestEps = listEpisodeMarkdowns().slice(0, 10);
+      await generateAndCheck(
+        targetPath,
+        () =>
+          [
+            `请根据 episode_index.md 的第 ${cmd.episode} 集框架，创作 ${fileName} 正文。`,
+            "要求：1-3个场景；对话极简犀利（单句≤15字）；只写必要动作表情；每场结尾留钩子。",
+            "输出格式：剧本正文（markdown），包含：标题、场景分隔、台词与动作。",
+            "",
+            "【outline.md】",
+            outline.trim(),
+            "",
+            "【character.md】",
+            character.trim(),
+            "",
+            "【episode_index.md】",
+            episodeIndex.trim(),
+            "",
+            existing.trim() ? `【${fileName}（旧）】\n${existing.trim()}\n` : "",
+            ...latestEps.flatMap((ep) => ["", `【参考：${ep.path}】`, (ep.markdown ?? "").trim() || "(空)"]),
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        (draft) =>
+          [
+            `请检查将要写入的 ${fileName} 是否符合短剧节奏/人设一致性/集目录对齐，并标注影响范围。`,
+            "",
+            "【outline.md】",
+            outline.trim(),
+            "",
+            "【character.md】",
+            character.trim(),
+            "",
+            "【episode_index.md】",
+            episodeIndex.trim(),
+            "",
+            `【${fileName}（新草稿）】`,
+            draft.trim(),
+          ].join("\n"),
+      );
+      return;
+    }
+
+    if (cmd.kind === "checkAll") {
+      const eps = listEpisodeMarkdowns().slice(0, 10);
+      const payload = [
+        "请对 outline.md、character.md、episode_index.md 与最近 10 集 EP 文件做全量一致性检查，输出 PASS/FAIL 与问题清单（含最小可行修改示例、影响范围、优先级）。",
+        "",
+        "【outline.md】",
+        outline.trim() ? outline.trim() : "(空)",
+        "",
+        "【character.md】",
+        character.trim() ? character.trim() : "(空)",
+        "",
+        "【episode_index.md】",
+        episodeIndex.trim() ? episodeIndex.trim() : "(空)",
+        "",
+        ...eps.flatMap((ep) => ["", `【${ep.path}】`, ep.markdown.trim() ? ep.markdown.trim() : "(空)"]),
+      ].join("\n");
+      setAssistant("正在进行全量检查…");
+      const report = await callChatStream(requestConfig, [{ role: "system", content: systemAligner }, { role: "user", content: payload }], signal);
+      setAssistant(report.trim());
+      return;
+    }
+
+    if (cmd.kind === "recordNow") {
+      const eps = listEpisodeMarkdowns().slice(0, 10);
+      setAssistant("正在更新进度记录…");
+      const progress = await runRecorderUpdate(
+        requestConfig,
+        signal,
+        [
+          { path: "outline.md", markdown: outline },
+          { path: "character.md", markdown: character },
+          { path: "episode_index.md", markdown: episodeIndex },
+          ...eps.map((e) => ({ path: e.path, markdown: e.markdown })),
+        ],
+      );
+      if (!progress) {
+        setAssistant("Error: 缺少 script-recorder 配置文件。");
+        return;
+      }
+      const writeResult = executeFsAction("write", "script.progress.md", progress);
+      if (writeResult.startsWith("Error:")) {
+        setAssistant(`更新失败：${writeResult}`);
+        return;
+      }
+      setAssistant("已更新 script.progress.md。");
+      return;
+    }
+
+    if (cmd.kind === "compress") {
+      const convo = projectConversations[activeProjectId]?.find((c) => c.id === activeConversationId)?.messages ?? [];
+      const tail = convo.slice(-40).map((m) => `${m.role.toUpperCase()}: ${m.content}`).join("\n\n");
+      const system = [
+        "你是上下文压缩器，负责把对话与文档状态压缩成可复用的项目记忆。",
+        "输出必须是 markdown，不要使用```包裹，不要输出 XML 标签。",
+        "必须包含：项目一句话简介、世界观/设定、人物关系、当前进度、未解决问题、下一步建议。",
+      ].join("\n");
+      const userPayload = [
+        "请基于以下对话片段与当前文档，生成 context.summary.md 的完整内容。",
+        "",
+        "【outline.md】",
+        outline.trim() ? outline.trim() : "(空)",
+        "",
+        "【character.md】",
+        character.trim() ? character.trim() : "(空)",
+        "",
+        "【episode_index.md】",
+        episodeIndex.trim() ? episodeIndex.trim() : "(空)",
+        "",
+        "【对话（最近）】",
+        tail ? tail : "(空)",
+      ].join("\n");
+      setAssistant("正在压缩上下文…");
+      const summary = await callChatStream(requestConfig, [{ role: "system", content: system }, { role: "user", content: userPayload }], signal);
+      const writeResult = executeFsAction("write", "context.summary.md", summary.trim());
+      if (writeResult.startsWith("Error:")) {
+        setAssistant(`压缩完成，但写入 context.summary.md 失败：${writeResult}`);
+        return;
+      }
+      setAssistant("已生成 context.summary.md。后续对话将优先使用该摘要以减少上下文长度。");
+      return;
+    }
+  };
+
   const sendMessage = async (overrideRaw?: string) => {
     if (!activeProjectId) return;
     const raw = overrideRaw ?? draft;
@@ -1170,6 +1812,9 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
 
     // 2. 准备 AI 回复的消息占位
     const assistantMsgId = uid("m");
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     setIsGenerating(true);
     setProjectConversations((prev) => ({
       ...prev,
@@ -1188,13 +1833,44 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
         throw new Error("未配置有效的模型或 API Key");
       }
 
+      const pending = pendingWriteConfirmRef.current;
+      const isAnswer = content.startsWith("【回答】") && content.includes("【选择】");
+      const answerChosen = isAnswer ? content.match(/【选择】([^\n]+)/)?.[1]?.trim() : null;
+      const cmdFromAnswer =
+        pending && isAnswer && answerChosen === "覆盖" ? ({ kind: "write", episode: pending.episode, force: true } as DramaCommand) : null;
+      if (pending && isAnswer && answerChosen === "取消") {
+        pendingWriteConfirmRef.current = null;
+        setProjectConversations((prev) => ({
+          ...prev,
+          [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
+            if (c.id !== activeConversationId) return c;
+            return {
+              ...c,
+              messages: c.messages.map((m) => (m.id === assistantMsgId ? { ...m, content: "已取消覆盖，未修改任何文件。" } : m)),
+            };
+          }),
+        }));
+        return;
+      }
+
+      const cmd = cmdFromAnswer ?? parseDramaCommand(content);
+      if (cmd) {
+        await runDramaCommand(cmd, requestConfig, controller.signal, assistantMsgId);
+        return;
+      }
+
       // 4. 调用 OpenAI 兼容接口
       const projectRoot = activeProjectId ? findNode(root, activeProjectId)?.node : null;
       const fileTree = projectRoot ? generateFileTreeContext(projectRoot) : "";
+      const mainAgentRole = [getMarkdownByPath("agent-settings/main-agentch.md")?.trim(), getMarkdownByPath("agent-settings/main-agent.md")?.trim()]
+        .filter(Boolean)
+        .join("\n\n");
+      const agentRoleBlock = mainAgentRole ? `\n\nAgent Role Prompts (read-only):\n${mainAgentRole}\n` : "";
       const systemPrompt = `You have the capability to read, write, append, and replace content in markdown files.
 Current File Structure:
+You can manage your own todo list shown at the top of the chat panel.
 You can also ask the user a multiple-choice question when you need clarification.
-${fileTree}
+${fileTree}${agentRoleBlock}
 
 To write a file (overwrite):
 <file_action type="write" path="folder/filename.md">
@@ -1225,6 +1901,18 @@ To ask the user for text input:
 <user_question header="SHORT_TITLE" question="QUESTION_TEXT" type="text" placeholder="PLACEHOLDER" multiline="false">
 </user_question>
 
+To manage your todo list:
+<todo_action type="set">
+- [ ] 1: First task
+- [~] 2: In progress task
+- [x] 3: Done task
+</todo_action>
+
+<todo_action type="complete" id="2" />
+<todo_action type="start" id="1" />
+<todo_action type="read" />
+<todo_action type="clear" />
+
 Rules:
 1. You CAN read files in 'agent-settings' folder, but CANNOT write to them.
 2. You CAN create/write files in the project root and 'episodes' folder.
@@ -1234,26 +1922,27 @@ Rules:
 
       // 构造发送给模型的消息列表
       const conversationHistory = projectConversations[activeProjectId]?.find(c => c.id === activeConversationId)?.messages || [];
-      const messagesToSend = [
-        { role: "system", content: systemPrompt },
-        ...conversationHistory.map(m => {
-          // 如果是 system 消息且包含 actions，将其转换为 user 消息，以便模型知道操作结果
-          if (m.role === "system" && m.content) {
-             return { role: "user", content: m.content };
-          }
-          // 普通消息直接透传
-          return {
-            role: m.role === "system" ? "user" : m.role,
-            content: m.content
-          };
-        }),
-        // 如果当前这次发送还包含了刚刚执行的 system action 结果，也需要加进去
-        ...(immediateResults.length > 0 ? [{ role: "user", content: immediateResults.join("\n\n") }] : []),
-        { role: "user", content }
-      ];
+      const contextSummary = getMarkdownByPath("context.summary.md")?.trim() || "";
+      const useSummary = !!contextSummary && conversationHistory.length > 24;
+      const historyForPrompt = useSummary ? conversationHistory.slice(-24) : conversationHistory;
+
+      const messagesToSend: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
+      messagesToSend.push({ role: "system", content: systemPrompt });
+      if (useSummary) messagesToSend.push({ role: "system", content: `Project Memory (context.summary.md):\n${contextSummary}` });
+      for (const m of historyForPrompt) {
+        if (m.role === "system" && m.content) {
+          messagesToSend.push({ role: "user", content: m.content });
+          continue;
+        }
+        const role = (m.role === "system" ? "user" : m.role) as "user" | "assistant";
+        messagesToSend.push({ role, content: m.content });
+      }
+      if (immediateResults.length > 0) messagesToSend.push({ role: "user", content: immediateResults.join("\n\n") });
+      messagesToSend.push({ role: "user", content });
 
       const response = await fetch(`${requestConfig.baseUrl}/chat/completions`, {
         method: "POST",
+        signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${requestConfig.apiKey}`,
@@ -1326,13 +2015,168 @@ Rules:
       }
 
       const questionRegex = /<user_question(\s+[^>]+)>([\s\S]*?)<\/user_question>/g;
+      const todoRegex = /<todo_action(\s+[^>]+)(?:>([\s\S]*?)<\/todo_action>|\s*\/?>)/g;
       const actionRegex = /<file_action(\s+[^>]+)(?:>([\s\S]*?)<\/file_action>|\s*\/?>)/g;
-      let match;
+      type ParsedFsAction = { type: FileActionType; path: string; search?: string; body?: string };
+
+      const updateAssistant = (text: string) => {
+        setProjectConversations((prev) => ({
+          ...prev,
+          [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
+            if (c.id !== activeConversationId) return c;
+            return {
+              ...c,
+              messages: c.messages.map((m) => (m.id === assistantMsgId ? { ...m, content: text } : m)),
+            };
+          }),
+        }));
+      };
+
+      const parseFsActions = (text: string) => {
+        const out: ParsedFsAction[] = [];
+        actionRegex.lastIndex = 0;
+        let match: RegExpExecArray | null = null;
+        while ((match = actionRegex.exec(text)) !== null) {
+          const attrsStr = match[1];
+          const body = match[2];
+          const getAttr = (name: string) => {
+            const m = attrsStr.match(new RegExp(`${name}=["']([^"']+)["']`));
+            return m ? m[1] : undefined;
+          };
+          const type = getAttr("type") as FileActionType | undefined;
+          const path = getAttr("path");
+          const search = getAttr("search");
+          if (!type || !path) continue;
+          out.push({ type, path, search, body: body ? body.trim() : undefined });
+        }
+        return out;
+      };
+
+      const isKeyDocPath = (p: string) => {
+        const normalized = p.replace(/\\/g, "/").replace(/^\.\//, "");
+        if (normalized === "outline.md") return true;
+        if (normalized === "character.md") return true;
+        if (normalized === "episode_index.md") return true;
+        if (/^episodes\/EP-\d+\.md$/i.test(normalized)) return true;
+        return false;
+      };
+
+      const simulateApply = (current: string, a: ParsedFsAction) => {
+        const body = a.body ?? "";
+        if (a.type === "write") return body;
+        if (a.type === "append") return current + (current && !current.endsWith("\n") ? "\n" : "") + body;
+        if (a.type === "replace") {
+          const search = a.search;
+          if (!search) return current;
+          if (!current.includes(search)) return current;
+          return current.replace(search, () => body);
+        }
+        return current;
+      };
+
+      const runAlignerGate = async (candidate: string) => {
+        const alignerPrompt = getMarkdownByPath("agent-settings/script-aligner.md")?.trim();
+        if (!alignerPrompt) return { status: "PASS" as const, report: "" };
+        const parsed = parseFsActions(candidate);
+        const writes = parsed.filter((a) => a.type !== "read");
+        const keyWrites = writes.filter((a) => isKeyDocPath(a.path));
+        if (keyWrites.length === 0) return { status: "PASS" as const, report: "" };
+
+        const draftMap = new Map<string, string>();
+        for (const a of writes) {
+          const prev = draftMap.has(a.path) ? (draftMap.get(a.path) ?? "") : getMarkdownByPath(a.path) ?? "";
+          draftMap.set(a.path, simulateApply(prev, a));
+        }
+
+        const outlineDraft = draftMap.get("outline.md") ?? (getMarkdownByPath("outline.md") ?? "");
+        const characterDraft = draftMap.get("character.md") ?? (getMarkdownByPath("character.md") ?? "");
+        const episodeIndexDraft = draftMap.get("episode_index.md") ?? (getMarkdownByPath("episode_index.md") ?? "");
+        const episodeDrafts = Array.from(draftMap.entries())
+          .filter(([p]) => /^episodes\/EP-\d+\.md$/i.test(p.replace(/\\/g, "/").replace(/^\.\//, "")))
+          .map(([p, md]) => ({ path: p, markdown: md }));
+
+        const payload = [
+          "请在写入前对以下文档进行一致性检查，输出 PASS/FAIL 与问题清单（含最小可行修改示例、影响范围、优先级）。",
+          "",
+          "【outline.md（将写入版本）】",
+          outlineDraft.trim() ? outlineDraft.trim() : "(空)",
+          "",
+          "【character.md（将写入版本）】",
+          characterDraft.trim() ? characterDraft.trim() : "(空)",
+          "",
+          "【episode_index.md（将写入版本）】",
+          episodeIndexDraft.trim() ? episodeIndexDraft.trim() : "(空)",
+          "",
+          ...episodeDrafts.flatMap((e) => ["", `【${e.path}（将写入版本）】`, e.markdown.trim() ? e.markdown.trim() : "(空)"]),
+        ].join("\n");
+
+        const systemAligner = [
+          alignerPrompt,
+          "",
+          "输出约束：",
+          "- 返回必须简洁、结构化，便于解析",
+          "- 必须明确给出 PASS 或 FAIL",
+          "- 若 FAIL：每条问题给出最小可行修改示例，并标注影响范围与优先级",
+          "- 不要输出```代码块，不要输出任何 XML 标签",
+        ].join("\n");
+
+        const report = await callChatStream(
+          requestConfig,
+          [
+            { role: "system", content: systemAligner },
+            { role: "user", content: payload },
+          ],
+          controller.signal,
+        );
+        const status = extractAlignerStatus(report);
+        return { status, report: report.trim() };
+      };
+
+      let finalContent = fullContent;
+      let lastAlignerReport = "";
+      for (let i = 1; i <= 4; i++) {
+        const gated = await runAlignerGate(finalContent);
+        if (gated.status === "PASS") break;
+        lastAlignerReport = gated.report;
+        updateAssistant(i === 1 ? "检查未通过，正在修订…" : `检查仍未通过，继续修订…（第 ${i} 轮）`);
+        finalContent = await callChatStream(
+          requestConfig,
+          [
+            ...messagesToSend,
+            { role: "assistant", content: finalContent },
+            {
+              role: "user",
+              content: [
+                "你刚才输出的写入内容未通过 script-aligner 检查。请根据反馈修订，并重新输出完整回复。",
+                "要求：保留原本的展示文本；如需写入文件，继续使用 <file_action>；不要对 agent-settings 做写入。",
+                "",
+                "【script-aligner 反馈】",
+                lastAlignerReport,
+              ].join("\n"),
+            },
+          ],
+          controller.signal,
+          (_d, full) => updateAssistant(full),
+        );
+      }
+
+      const gatedFinal = await runAlignerGate(finalContent);
+      if (gatedFinal.status === "FAIL") {
+        updateAssistant(gatedFinal.report || "检查未通过，且无法自动修订到通过状态。");
+        return;
+      }
+
+      actionRegex.lastIndex = 0;
+      questionRegex.lastIndex = 0;
+      todoRegex.lastIndex = 0;
+
+      let match: RegExpExecArray | null = null;
       const results: string[] = [];
       const actions: { type: FileActionType; path: string; ok: boolean }[] = [];
       const questions: UserQuestionPayload[] = [];
+      const todoActions: Array<{ type: string; id?: string; body?: string }> = [];
       
-      while ((match = actionRegex.exec(fullContent)) !== null) {
+      while ((match = actionRegex.exec(finalContent)) !== null) {
           const attrsStr = match[1];
           const body = match[2];
           
@@ -1355,8 +2199,25 @@ Rules:
           actions.push({ type, path, ok: !result.startsWith("Error:") });
       }
 
+      const okWritePaths = new Set(actions.filter((a) => a.ok && a.type !== "read" && isKeyDocPath(a.path)).map((a) => a.path));
+      if (okWritePaths.size > 0) {
+        const parsedForRecord = parseFsActions(finalContent).filter((a) => a.type !== "read" && okWritePaths.has(a.path));
+        const draftMap = new Map<string, string>();
+        for (const a of parsedForRecord) {
+          const prev = draftMap.has(a.path) ? (draftMap.get(a.path) ?? "") : getMarkdownByPath(a.path) ?? "";
+          draftMap.set(a.path, simulateApply(prev, a));
+        }
+        const changed = Array.from(draftMap.entries()).map(([path, markdown]) => ({ path, markdown }));
+        const progress = await runRecorderUpdate(requestConfig, controller.signal, changed);
+        if (progress) {
+          const progressWrite = executeFsAction("write", "script.progress.md", progress);
+          results.push(`[System] Action: write script.progress.md\nResult: ${progressWrite}`);
+          actions.push({ type: "write", path: "script.progress.md", ok: !progressWrite.startsWith("Error:") });
+        }
+      }
+
       let qMatch: RegExpExecArray | null = null;
-      while ((qMatch = questionRegex.exec(fullContent)) !== null) {
+      while ((qMatch = questionRegex.exec(finalContent)) !== null) {
         const attrsStr = qMatch[1];
         const body = qMatch[2] ?? "";
 
@@ -1419,7 +2280,87 @@ Rules:
         });
       }
 
-      const displayContent = fullContent.replace(actionRegex, "").replace(questionRegex, "").trim();
+      let tMatch: RegExpExecArray | null = null;
+      while ((tMatch = todoRegex.exec(finalContent)) !== null) {
+        const attrsStr = tMatch[1];
+        const body = tMatch[2];
+        const getAttr = (name: string) => {
+          const match = attrsStr.match(new RegExp(`${name}=["']([^"']+)["']`));
+          return match ? match[1] : undefined;
+        };
+        const type = (getAttr("type") ?? "").trim();
+        const id = getAttr("id")?.trim();
+        todoActions.push({ type, id, body: body?.trim() });
+      }
+
+      const displayContent = finalContent.replace(actionRegex, "").replace(questionRegex, "").replace(todoRegex, "").trim();
+
+      const parseTodoItems = (raw: string) => {
+        const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean);
+        const out: AiTodoItem[] = [];
+        for (const line of lines) {
+          const m = line.match(/^-+\s*\[([ x~])\]\s*(.+)$/i);
+          if (!m) continue;
+          const mark = m[1];
+          const rest = m[2].trim();
+          const status: AiTodoStatus = mark.toLowerCase() === "x" ? "completed" : mark === "~" ? "in_progress" : "pending";
+          const idMatch = rest.match(/^([^:]{1,40}):\s*(.+)$/);
+          const rawId = idMatch?.[1]?.trim();
+          const content = (idMatch?.[2] ?? rest).trim();
+          if (!content) continue;
+          const id =
+            rawId && /^[a-zA-Z0-9_-]+$/.test(rawId) ? rawId : `${out.length + 1}`;
+          out.push({ id, content, status });
+        }
+        if (out.length > 0) return out;
+        const fallback = raw.split("\n").map((l) => l.trim()).filter(Boolean);
+        for (const line of fallback) {
+          out.push({ id: `${out.length + 1}`, content: line, status: "pending" });
+        }
+        return out;
+      };
+
+      const applyTodoActions = (current: AiTodoItem[]) => {
+        let next = [...current];
+        let readRequested = false;
+        for (const a of todoActions) {
+          const t = a.type;
+          if (!t) continue;
+          if (t === "set") {
+            const items = a.body ? parseTodoItems(a.body) : [];
+            next = items;
+            continue;
+          }
+          if (t === "add") {
+            const items = a.body ? parseTodoItems(a.body) : [];
+            if (items.length > 0) next = [...next, ...items];
+            continue;
+          }
+          if (t === "clear") {
+            next = [];
+            continue;
+          }
+          if (t === "read") {
+            readRequested = true;
+            continue;
+          }
+          const id = a.id;
+          if (!id) continue;
+          if (t === "complete") {
+            next = next.map((x) => (x.id === id ? { ...x, status: "completed" } : x));
+            continue;
+          }
+          if (t === "start") {
+            next = next.map((x) => (x.id === id ? { ...x, status: "in_progress" } : x));
+            continue;
+          }
+          if (t === "pending") {
+            next = next.map((x) => (x.id === id ? { ...x, status: "pending" } : x));
+            continue;
+          }
+        }
+        return { next, readRequested };
+      };
 
       const resultMsgId = results.length > 0 ? uid("m") : null;
       const resultContent = results.join("\n\n");
@@ -1438,6 +2379,22 @@ Rules:
         };
       });
 
+      const currentTodos =
+        projectConversations[activeProjectId]?.find((c) => c.id === activeConversationId)?.aiTodos ?? [];
+      const { next: nextTodos, readRequested } = applyTodoActions(currentTodos);
+      const todoReadMessage: ConversationMessage | null = readRequested
+        ? {
+            id: uid("m"),
+            role: "system",
+            content:
+              nextTodos.length === 0
+                ? "[System] Todo List: (empty)"
+                : `[System] Todo List:\n${nextTodos
+                    .map((t) => `- ${t.status === "completed" ? "[x]" : t.status === "in_progress" ? "[~]" : "[ ]"} ${t.id}: ${t.content}`)
+                    .join("\n")}`,
+          }
+        : null;
+
       setProjectConversations((prev) => ({
         ...prev,
         [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
@@ -1447,12 +2404,14 @@ Rules:
           if (results.length > 0 && resultMsgId) {
             extras.push({ id: resultMsgId, role: "system", content: resultContent, actions });
           }
+          if (todoReadMessage) extras.push(todoReadMessage);
           extras.push(...questionMessages);
-          return { ...c, messages: [...updated, ...extras] };
+          return { ...c, messages: [...updated, ...extras], aiTodos: nextTodos };
         }),
       }));
 
     } catch (error: any) {
+      if (error?.name === "AbortError") return;
       console.error("Chat error:", error);
       // 将错误信息显示在对话中
       setProjectConversations((prev) => ({
@@ -1469,6 +2428,7 @@ Rules:
       }));
     } finally {
       setIsGenerating(false);
+      abortControllerRef.current = null;
     }
   };
 
@@ -1830,6 +2790,41 @@ Rules:
           </button>
         </div>
 
+        {activeProjectId ? (
+          <div className="shrink-0 border-b border-zinc-800 px-3 py-2">
+            <div className="flex items-center justify-between">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-600">AI Todo</div>
+              <div className="text-[10px] text-zinc-600">{activeConversationTodos.length}</div>
+            </div>
+            {activeConversationTodos.length === 0 ? (
+              <div className="mt-1 text-[11px] text-zinc-600">暂无</div>
+            ) : (
+              <div className="mt-2 max-h-24 space-y-1 overflow-y-auto pr-1">
+                {activeConversationTodos.map((t) => (
+                  <div key={t.id} className="flex items-start gap-2 text-[12px] text-zinc-400">
+                    <span
+                      className={cn(
+                        "mt-0.5 shrink-0 text-[11px]",
+                        t.status === "completed"
+                          ? "text-emerald-400/80"
+                          : t.status === "in_progress"
+                            ? "text-blue-400/80"
+                            : "text-zinc-500",
+                      )}
+                    >
+                      {t.status === "completed" ? "[x]" : t.status === "in_progress" ? "[~]" : "[ ]"}
+                    </span>
+                    <span className="shrink-0 text-zinc-600">{t.id}</span>
+                    <span className={cn("min-w-0 flex-1 truncate", t.status === "completed" ? "text-zinc-500 line-through" : null)}>
+                      {t.content}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : null}
+
         <div className="flex max-h-44 shrink-0 flex-col gap-2 overflow-y-auto border-b border-zinc-800 p-3">
           <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-600">历史对话</div>
           <div className="space-y-1">
@@ -2026,14 +3021,16 @@ Rules:
               );
             })}
 
-            <div className="space-y-1.5 px-1">
-              <div className="flex items-center gap-2 text-[11px] text-zinc-500">
-                <div className="h-3 w-3 animate-spin rounded-full border-2 border-zinc-700 border-t-zinc-400" />
-                <span>
-                  思考中 <span className="text-zinc-400">...</span>
-                </span>
+            {isGenerating ? (
+              <div className="space-y-1.5 px-1">
+                <div className="flex items-center gap-2 text-[11px] text-zinc-500">
+                  <div className="h-3 w-3 animate-spin rounded-full border-2 border-zinc-700 border-t-zinc-400" />
+                  <span>
+                    思考中 <span className="text-zinc-400">...</span>
+                  </span>
+                </div>
               </div>
-            </div>
+            ) : null}
             </div>
           )}
         </div>
@@ -2042,9 +3039,47 @@ Rules:
           <div className="relative rounded-xl border border-zinc-700 bg-[#252525] shadow-inner transition-all focus-within:border-blue-500/50 focus-within:ring-1 focus-within:ring-blue-500/20">
             <textarea
               placeholder="计划、搜索、构建任何东西..."
+              ref={chatInputRef}
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                setChatCaret(e.target.selectionStart ?? e.target.value.length);
+                setDismissedCommandToken(null);
+              }}
+              onSelect={(e) => {
+                const el = e.target as HTMLTextAreaElement;
+                setChatCaret(el.selectionStart ?? 0);
+              }}
               onKeyDown={(e) => {
+                if (commandHint) {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setCommandActiveIndex((prev) => Math.min(prev + 1, commandHint.items.length - 1));
+                    return;
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setCommandActiveIndex((prev) => Math.max(prev - 1, 0));
+                    return;
+                  }
+                  if (e.key === "Tab") {
+                    e.preventDefault();
+                    const item = commandHint.items[commandActiveIndex] ?? commandHint.items[0];
+                    if (item) applyCommandHint(item.insert);
+                    return;
+                  }
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    const item = commandHint.items[commandActiveIndex] ?? commandHint.items[0];
+                    if (item) applyCommandHint(item.insert);
+                    return;
+                  }
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setDismissedCommandToken(commandHint.tokenPrefix);
+                    return;
+                  }
+                }
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   if (!isGenerating) sendMessage();
@@ -2057,6 +3092,29 @@ Rules:
               )}
               rows={3}
             />
+            {commandHint ? (
+              <div className="absolute bottom-14 left-3 right-3 z-50 overflow-hidden rounded-lg border border-zinc-800 bg-[#141414] shadow-2xl">
+                <div className="max-h-44 overflow-y-auto p-1">
+                  {commandHint.items.map((item, idx) => (
+                    <button
+                      key={item.title}
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        applyCommandHint(item.insert);
+                      }}
+                      className={cn(
+                        "flex w-full items-start justify-between gap-3 rounded-md px-2.5 py-2 text-left text-xs transition-colors",
+                        idx === commandActiveIndex ? "bg-zinc-800 text-zinc-200" : "text-zinc-300 hover:bg-zinc-800/60",
+                      )}
+                    >
+                      <span className="shrink-0 font-medium text-zinc-200">{item.title}</span>
+                      <span className="min-w-0 flex-1 truncate text-right text-[11px] text-zinc-500">{item.description}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between">
               <div className="flex items-center gap-1.5">
                 <button
@@ -2108,23 +3166,30 @@ Rules:
                   )}
                 </div>
               </div>
-              <button
-                onClick={() => sendMessage()}
-                disabled={!activeProjectId || isGenerating || !draft.trim()}
-                className={cn(
-                  "flex h-8 w-8 items-center justify-center rounded-full transition-all",
-                  activeProjectId && draft.trim() && !isGenerating
-                    ? "scale-105 bg-zinc-100 text-black shadow-lg"
-                    : "bg-zinc-800 text-zinc-600",
-                )}
-                type="button"
-              >
-                {isGenerating ? (
-                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-600 border-t-zinc-400" />
-                ) : (
+              {isGenerating ? (
+                <button
+                  onClick={stopGenerating}
+                  className="flex h-8 w-8 items-center justify-center rounded-full bg-rose-500/10 text-rose-300 transition-colors hover:bg-rose-500/15"
+                  type="button"
+                  title="停止生成"
+                >
+                  <X size={16} strokeWidth={2.5} />
+                </button>
+              ) : (
+                <button
+                  onClick={() => sendMessage()}
+                  disabled={!activeProjectId || !draft.trim()}
+                  className={cn(
+                    "flex h-8 w-8 items-center justify-center rounded-full transition-all",
+                    activeProjectId && draft.trim()
+                      ? "scale-105 bg-zinc-100 text-black shadow-lg"
+                      : "bg-zinc-800 text-zinc-600",
+                  )}
+                  type="button"
+                >
                   <ArrowUp size={16} strokeWidth={3} />
-                )}
-              </button>
+                </button>
+              )}
             </div>
           </div>
         </div>

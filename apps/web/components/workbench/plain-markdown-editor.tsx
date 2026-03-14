@@ -1,8 +1,9 @@
 "use client";
 
 import { cn } from "@/lib/utils";
+import { Check, Loader2 } from "lucide-react";
 import Markdown from "react-markdown";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useDebouncedCallback } from "use-debounce";
 
 type PlainMarkdownEditorProps = {
@@ -14,6 +15,15 @@ export default function PlainMarkdownEditor({ storageKey, wrapperClassName }: Pl
   const keyMarkdown = useMemo(() => `${storageKey}:markdown`, [storageKey]);
   const [value, setValue] = useState("");
   const [mode, setMode] = useState<"edit" | "preview">("edit");
+  const [isSaving, setIsSaving] = useState(false);
+  const isMounted = useRef(false);
+
+  useEffect(() => {
+    isMounted.current = true;
+    return () => {
+      isMounted.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     const existing = window.localStorage.getItem(keyMarkdown) ?? "";
@@ -31,12 +41,41 @@ export default function PlainMarkdownEditor({ storageKey, wrapperClassName }: Pl
 
   const persist = useDebouncedCallback((next: string) => {
     window.localStorage.setItem(keyMarkdown, next);
-  }, 150);
+    if (isMounted.current) {
+      setIsSaving(false);
+    }
+  }, 1000);
+
+  useEffect(() => {
+    const onBeforeUnload = () => {
+      persist.flush();
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      persist.flush();
+    };
+  }, [persist]);
 
   return (
     <div className={cn("w-full", wrapperClassName)}>
       <div className="mb-3 flex items-center justify-between">
-        <div className="text-xs text-zinc-500">Markdown</div>
+        <div className="flex items-center gap-3">
+          <div className="text-xs text-zinc-500">Markdown</div>
+          <div className="flex items-center gap-1.5 rounded-full bg-zinc-800/50 px-2 py-0.5 text-[10px] text-zinc-400">
+            {isSaving ? (
+              <>
+                <Loader2 className="h-3 w-3 animate-spin" />
+                <span>保存中...</span>
+              </>
+            ) : (
+              <>
+                <Check className="h-3 w-3 text-emerald-500/80" />
+                <span>已保存</span>
+              </>
+            )}
+          </div>
+        </div>
         <div className="flex items-center gap-2 text-xs">
           <button
             type="button"
@@ -67,6 +106,7 @@ export default function PlainMarkdownEditor({ storageKey, wrapperClassName }: Pl
           onChange={(e) => {
             const next = e.target.value;
             setValue(next);
+            setIsSaving(true);
             persist(next);
           }}
           spellCheck={false}
