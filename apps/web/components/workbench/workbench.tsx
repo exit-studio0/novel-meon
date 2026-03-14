@@ -32,11 +32,13 @@ export type FsNode = {
   content?: string;
 };
 
+type FileActionType = "read" | "write" | "append" | "replace";
+
 type ConversationMessage = {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
-  actions?: { type: "read" | "write" | "append"; path: string; ok: boolean }[];
+  actions?: { type: FileActionType; path: string; ok: boolean }[];
 };
 
 type Conversation = {
@@ -932,9 +934,10 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
   const [isGenerating, setIsGenerating] = useState(false);
 
   // --- File System Capabilities ---
-  const checkFileAccess = (path: string, type: "read" | "write" = "read") => {
+  const checkFileAccess = (path: string, type: FileActionType = "read") => {
     const normalized = path.replace(/\\/g, "/").replace(/^\.\//, "");
-    if (type === "write" && (normalized.startsWith("agent-settings/") || normalized.includes("/agent-settings/"))) return false;
+    const isWriteLike = type === "write" || type === "append" || type === "replace";
+    if (isWriteLike && (normalized.startsWith("agent-settings/") || normalized.includes("/agent-settings/"))) return false;
     return true;
   };
 
@@ -950,7 +953,7 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
     return output;
   };
 
-  const executeFsAction = (type: "read" | "write" | "append" | "replace", path: string, content?: string, options?: { search?: string }): string => {
+  const executeFsAction = (type: FileActionType, path: string, content?: string, options?: { search?: string }): string => {
     if (!activeProjectId) return "Error: No active project.";
     const normalizedPath = path.replace(/\\/g, "/");
     if (!checkFileAccess(normalizedPath, type)) return `Error: Access denied to '${path}'.`;
@@ -1065,7 +1068,7 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
     // New regex to be more attribute-agnostic
     const actionRegex = /<file_action(\s+[^>]+)(?:>([\s\S]*?)<\/file_action>|\s*\/?>)/g;
     const immediateResults: string[] = [];
-    const immediateActions: { type: "read" | "write" | "append" | "replace"; path: string; ok: boolean }[] = [];
+    const immediateActions: { type: FileActionType; path: string; ok: boolean }[] = [];
     let immediateMatch: RegExpExecArray | null = null;
     while ((immediateMatch = actionRegex.exec(raw)) !== null) {
       const attrsStr = immediateMatch[1];
@@ -1076,7 +1079,7 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
           return match ? match[1] : undefined;
       };
       
-      const type = getAttr("type") as "read" | "write" | "append" | "replace" | undefined;
+      const type = getAttr("type") as FileActionType | undefined;
       const path = getAttr("path");
       const search = getAttr("search"); // for replace
 
@@ -1271,7 +1274,7 @@ Rules:
       const actionRegex = /<file_action(\s+[^>]+)(?:>([\s\S]*?)<\/file_action>|\s*\/?>)/g;
       let match;
       const results: string[] = [];
-      const actions: { type: "read" | "write" | "append" | "replace"; path: string; ok: boolean }[] = [];
+      const actions: { type: FileActionType; path: string; ok: boolean }[] = [];
       
       while ((match = actionRegex.exec(fullContent)) !== null) {
           const attrsStr = match[1];
@@ -1282,7 +1285,7 @@ Rules:
               return match ? match[1] : undefined;
           };
           
-          const type = getAttr("type") as "read" | "write" | "append" | "replace" | undefined;
+          const type = getAttr("type") as FileActionType | undefined;
           const path = getAttr("path");
           const search = getAttr("search"); // for replace
 
@@ -1751,7 +1754,13 @@ Rules:
                       <div key={idx} className="flex items-center gap-2 text-[11px] text-zinc-500">
                         {action.type === "read" ? <Search size={12} /> : <Pencil size={12} />}
                         <span>
-                          {action.type === "read" ? "已阅读" : action.type === "append" ? "已追加" : "已写入"}{" "}
+                          {action.type === "read"
+                            ? "已阅读"
+                            : action.type === "append"
+                              ? "已追加"
+                              : action.type === "replace"
+                                ? "已替换"
+                                : "已写入"}{" "}
                           <span className="font-medium text-zinc-400">{action.path}</span>
                           <span className={cn("ml-2 text-[10px]", action.ok ? "text-emerald-400/70" : "text-rose-400/70")}>
                             {action.ok ? "成功" : "失败"}
