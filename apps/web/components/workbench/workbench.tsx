@@ -36,7 +36,7 @@ type ConversationMessage = {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
-  actions?: { type: "read" | "write"; path: string }[];
+  actions?: { type: "read" | "write"; path: string; ok: boolean }[];
 };
 
 type Conversation = {
@@ -1019,9 +1019,43 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
 
   const sendMessage = async () => {
     if (!activeProjectId) return;
-    const content = draft.trim();
-    if (!content || !activeConversationId) return;
+    const raw = draft;
+    const trimmed = raw.trim();
+    if (!trimmed || !activeConversationId) return;
     setDraft("");
+
+    const immediateRegex = /<file_action\s+type="([^"]+)"\s+path="([^"]+)"(?:\s*\/?>|>(.*?)<\/file_action>)/gs;
+    const immediateResults: string[] = [];
+    const immediateActions: { type: "read" | "write"; path: string; ok: boolean }[] = [];
+    let immediateMatch: RegExpExecArray | null = null;
+    while ((immediateMatch = immediateRegex.exec(raw)) !== null) {
+      const type = immediateMatch[1] as "read" | "write";
+      const path = immediateMatch[2];
+      const body = immediateMatch[3];
+      const result = executeFsAction(type, path, body);
+      immediateResults.push(`[System] Action: ${type} ${path}\nResult: ${result}`);
+      immediateActions.push({ type, path, ok: !result.startsWith("Error:") });
+    }
+
+    const stripped = raw.replace(immediateRegex, "").trim();
+    const content = immediateActions.length > 0 ? stripped : trimmed;
+
+    if (immediateActions.length > 0) {
+      const resultMsgId = uid("m");
+      const resultContent = immediateResults.join("\n\n");
+      setProjectConversations((prev) => ({
+        ...prev,
+        [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
+          if (c.id !== activeConversationId) return c;
+          return {
+            ...c,
+            messages: [...c.messages, { id: resultMsgId, role: "system", content: resultContent, actions: immediateActions }],
+          };
+        }),
+      }));
+    }
+
+    if (!content) return;
 
     // 1. 添加用户消息到界面
     const userMsgId = uid("m");
@@ -1150,7 +1184,7 @@ Rules:
       const actionRegex = /<file_action\s+type="([^"]+)"\s+path="([^"]+)"(?:\s*\/?>|>(.*?)<\/file_action>)/gs;
       let match;
       const results: string[] = [];
-      const actions: { type: "read" | "write"; path: string }[] = [];
+      const actions: { type: "read" | "write"; path: string; ok: boolean }[] = [];
       
       while ((match = actionRegex.exec(fullContent)) !== null) {
           const type = match[1] as "read" | "write";
@@ -1158,7 +1192,7 @@ Rules:
           const content = match[3];
           const result = executeFsAction(type, path, content);
           results.push(`[System] Action: ${type} ${path}\nResult: ${result}`);
-          actions.push({ type, path });
+          actions.push({ type, path, ok: !result.startsWith("Error:") });
       }
 
       if (results.length > 0) {
@@ -1618,6 +1652,9 @@ Rules:
                         <span>
                           {action.type === "read" ? "已阅读" : "已写入"}{" "}
                           <span className="font-medium text-zinc-400">{action.path}</span>
+                          <span className={cn("ml-2 text-[10px]", action.ok ? "text-emerald-400/70" : "text-rose-400/70")}>
+                            {action.ok ? "成功" : "失败"}
+                          </span>
                         </span>
                       </div>
                     ))}
