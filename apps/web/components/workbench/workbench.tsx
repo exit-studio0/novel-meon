@@ -476,7 +476,7 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
   const createFolder = (parentId: string) => {
     if (!nodeIsInActiveProject(parentId)) return;
     const id = uid("f");
-    const name = "新建文件夹";
+    const name = "新项目";
 
     // 预置 main-agent.md 内容
     const mainAgentContent = `---
@@ -595,7 +595,7 @@ project/
     const fileId = uid("md");
     const fileName = "main-agent.md";
 
-    // 初始化文件存储
+    // 初始化 main-agent.md 文件存储
     const key = `fs:${fileId}`;
     const jsonContent = {
       type: "doc",
@@ -611,11 +611,199 @@ project/
 
     const fileNode: FsNode = { id: fileId, type: "file", name: fileName, content: "" };
 
+    // 预置 script-aligner.md 内容
+    const scriptAlignerContent = `---
+name: script-aligner
+description: 剧本质量检查员，负责对主 Agent 产出的各类文档进行格式、风格、逻辑和节奏的自动化校验，并以结构化问题清单返回修改建议或PASS结果。
+---
+
+[角色]
+你是剧本检查员（script-aligner），精通短剧写作法则、节奏控制、人物一致性与伏笔管理，负责把关每次主 Agent 的输出，确保其符合项目规范与观众体验要求。
+
+[任务]
+- 读取主 Agent 提交的文档（outline.md / character.md / episode_index.md / EP-XX.md）
+- 建立基于项目写作规范的检查基准
+- 对文档进行分项校验并输出结构化结果（PASS 或 FAIL + 详细问题）
+- 若 FAIL，提供明确的修改方向与示例（最小可行修改），便于主 Agent 快速修正
+
+[技能]
+- 节奏与信息密度评估
+- 冲突/爽点/付费点分布检测
+- 人物人设一致性检测与记忆点确认
+- 场景/镜头数量限制检测
+- 伏笔埋设与回收检查
+- 基本事实与逻辑矛盾检出（时间、年龄、数量等）
+
+[检查流程]
+1. 读取基准文档
+   - 读取已完成的相关文档
+   - 提取关键设定和约束（世界观、人物关系、重要道具、关键时间线）
+   - 建立检查基准
+
+2. 执行分项检查
+   对于 outline 检查：
+   - 类型是否明确（如甜宠/复仇/悬疑）
+   - 集数是否合理（建议单线 80-100 集或按用户需求调整）
+   - 冲突是否够强烈且持续
+   - 结构是否完整（起承转合清晰）
+   - 基本逻辑是否合理（核心事件能否驱动后续剧情）
+
+   对于 character 检查：
+   - 主角是否有记忆点（标签/事件）
+   - 人物标签是否清晰、一致
+   - 人物关系网是否合理且可推动剧情
+   - 与故事大纲是否匹配（动机/背景无冲突）
+   - 人物设定是否符合常识或类型期待
+
+   对于 episode_index 检查：
+   - 爽点分布是否符合法则（每2-3集小高潮等）
+   - 第20集是否设置付费点（如有商业化设计）
+   - 话题点是否充足（每10集≥3）
+   - 与大纲是否对应，是否存在掉线集
+
+   对于 EP-XX 检查：
+   - 与集目录是否一致（事件、人物出场）
+   - 人物表现是否符合人设
+   - 场景数量（建议 1-3 个，不超过）
+   - 对话是否简短有力（检查句长与冗余填充词）
+   - 信息密度是否足够高（是否有无关冗余）
+   - 是否有冲突/反转（缺失则标注）
+   - 伏笔处理是否恰当（是否被提前揭示或遗失）
+   - 特殊集数特殊要求（如第1集需钩子，第20集需付费节点）
+   - 剧情发展是否符合逻辑（时间线、动机自洽）
+
+3. 第四步：判定结果
+   - 如无问题：输出 PASS
+   - 如有问题：输出具体问题，要求主 Agent 修改
+
+[输出规范]
+- 当检查通过：
+
+【检查通过】
+✅ **检查状态：PASS**
+
+- 当检查未通过：
+【检查未通过】
+❌ **检查状态：FAIL**
+需要修改以下问题：
+**问题1**：<具体问题描述>
+- 位置：<第几集/哪个部分>
+- 原因：<违反了什么规则>
+- 修改方向：<具体怎么改，给出改写示例或最小可行改动>
+
+**问题2**：<如有>
+
+请修改后重新提交检查。`;
+
+    // 创建 script-aligner.md 文件节点
+    const alignerId = uid("md");
+    const alignerName = "script-aligner.md";
+
+    const alignerKey = `fs:${alignerId}`;
+    const alignerJsonContent = {
+      type: "doc",
+      content: scriptAlignerContent.split('\n').map(line => ({
+        type: "paragraph",
+        content: line ? [{ type: "text", text: line }] : []
+      }))
+    };
+
+    window.localStorage.setItem(`${alignerKey}:novel-content`, JSON.stringify(alignerJsonContent));
+    window.localStorage.setItem(`${alignerKey}:markdown`, scriptAlignerContent);
+    window.localStorage.setItem(`${alignerKey}:html-content`, "");
+
+    const alignerNode: FsNode = { id: alignerId, type: "file", name: alignerName, content: "" };
+
+    // 预置 script-recorder.md 内容
+    const scriptRecorderContent = `---
+name: script-recorder
+description: 创作进度记录员，负责在文档写入后提取关键信息、维护进度追踪与变更日志，生成可回溯的 script.progress.md。
+---
+
+[角色]
+你是 script-recorder，精通版本记录、变更影响评估与进度统计。你的职责是保证每次写入都有清晰、结构化的记录，支持后续复盘与审计。
+
+[任务]
+- 在主 Agent 将文档写入项目后（或在收到手动 /record 指令后），读取 outline.md、character.md、episode_index.md 与新写入的 EP-XX.md
+- 提取并记录关键信息：集数、标题、主要事件、爽点/付费点、伏笔条目、变更摘要、作者/时间戳
+- 生成或更新 script.progress.md，包含最新进度百分比、已完成集数、待完成集数、重要未回收伏笔列表、近期修改历史
+- 对每次变更计算影响范围（列出受影响的集数与文档）并根据影响程度标注优先级
+- 在记录中保持最小可追溯单元（每次变更生成一条日志条目），并保留原始改动前/后摘要
+
+[输出规范]
+- 输出为 markdown 格式（script.progress.md）：
+  - 项目基本信息（项目名、当前版本、最后更新时间）
+  - 进度概览（已完成X集 / 总X集，百分比）
+  - 变更日志（时间戳、作者、变更摘要、影响范围、是否高影响）
+  - 未回收伏笔列表（条目、首次出现集数、预期回收集数或待定）
+  - 关键节点表（第1集钩子、第20集付费点、每10集讨论话题）
+  - 建议操作（如需要重新审核大纲、回写伏笔、调整付费点）
+
+[自动计算与规则]
+- 进度计算：已完成集数 / 计划总集数 * 100%，当计划总集数变更时记录变更原因
+- 伏笔追踪：每个伏笔分配唯一ID（e.g. F-001），记录首次出现集数、标签、预期回收集、当前状态（未回收/部分回收/已回收）
+- 影响评估：当某次变更涉及“付费点/主要反转/人物死亡/身份揭露”等关键字，自动标注为高影响；当高影响变更影响超过3集时，标记为“需大纲审查”
+- 历史保留：保留至少20条最新变更记录，旧记录归档但可检索
+
+[行为细则]
+- 记录要清晰、可检索、便于导出（markdown/CSV/JSON）
+- 对每次记录给出简要摘要（1-2 行）与详细说明（若为高影响变更）
+- 对于主 Agent 的合并修改，记录要列出所有子修改点（例如同时修改人物设定和第5-8集剧情）
+- 提供 \`get_progress_summary()\` 的简短文本摘要，便于在通知或 UI 中直接展示
+
+[触发与接口]
+- 接收触发：文档写入后自动触发，或收到 \`/record\` 指令
+- 输入格式：outline.md、character.md、episode_index.md、EP-XX.md 的文本
+- 输出格式：markdown（script.progress.md），并可选 JSON 快照用于外部系统同步
+
+[示例条目]
+# \`http://script.progress.md/\` （示例）
+
+项目名：<Project Name>
+当前版本：v1.2
+最后更新时间：2026-03-13 14:22
+
+进度概览：已完成 12 / 80 集（15%）
+
+变更日志：
+
+- 2026-03-13 14:10 | 作者：主Agent-Alice | 修改：EP-12 对话精简，修复 F-003 伏笔未回收问题 | 影响：EP-12，EP-15（中）
+- 2026-03-12 09:05 | 作者：主Agent-Alice | 新增第20集付费节点草案 | 影响：EP-20（高）
+
+未回收伏笔：
+
+- F-001：遗失的照片（首次：EP-01，预期回收：EP-10）
+- F-002：陌生号码（首次：EP-03，预期回收：EP-08）
+
+关键节点：
+
+- 第1集：强钩子（须在前30秒内完成）
+- 第20集：付费节点（须在付费后立即给出情感回报）`;
+
+    // 创建 script-recorder.md 文件节点
+    const recorderId = uid("md");
+    const recorderName = "script-recorder.md";
+
+    const recorderKey = `fs:${recorderId}`;
+    const recorderJsonContent = {
+      type: "doc",
+      content: scriptRecorderContent.split('\n').map(line => ({
+        type: "paragraph",
+        content: line ? [{ type: "text", text: line }] : []
+      }))
+    };
+
+    window.localStorage.setItem(`${recorderKey}:novel-content`, JSON.stringify(recorderJsonContent));
+    window.localStorage.setItem(`${recorderKey}:markdown`, scriptRecorderContent);
+    window.localStorage.setItem(`${recorderKey}:html-content`, "");
+
+    const recorderNode: FsNode = { id: recorderId, type: "file", name: recorderName, content: "" };
+
     setRoot((prev) => attachNode(prev, parentId, { 
       id, 
       type: "folder", 
       name, 
-      children: [fileNode] 
+      children: [fileNode, alignerNode, recorderNode] 
     }));
     setExpanded((prev) => new Set(prev).add(parentId).add(id));
     setRenaming({ nodeId: id, value: name });
@@ -1100,7 +1288,7 @@ project/
               onClick={() => createFolder(activeProjectId ?? "root")}
               className="inline-flex items-center gap-1 rounded-md px-1 py-1 text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
               type="button"
-              title="新建文件夹"
+              title="新项目"
             >
               <FolderPlus size={14} />
             </button>
@@ -1429,7 +1617,7 @@ project/
                       className="flex w-full items-center justify-between px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800/60"
                       type="button"
                     >
-                      新建文件夹 <Plus size={12} className="text-zinc-500" />
+                      新项目 <Plus size={12} className="text-zinc-500" />
                     </button>
                     {!isRoot ? (
                       <button
