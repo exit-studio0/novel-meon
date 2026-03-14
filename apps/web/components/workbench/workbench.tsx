@@ -562,16 +562,19 @@ description: 将Claude Code的输出转换为适合中国微短剧的创作风�
 - **文件管理**：维护outline.md、character.md、episode_index.md、episodes等项目文档
 
 [文件结构]
-project/
-  ├─ rule.md              # 项目规则和主Agent配置
-  ├─ script.progress.md   # 创作进度记录（由script-recorder维护）
-  ├─ outline.md           # 剧情简介和故事大纲
-  ├─ character.md         # 人物小传
-  ├─ episode_index.md     # 集目录
-  └─ episodes/
-      ├─ EP-01.md         # 第1集正文
-      ├─ EP-02.md         # 第2集正文
-      └─ ...
+新项目/
+  ├─ agent-settings/          # Agent 配置文件夹
+  │   ├─ main-agent.md        # 主 Agent (Short-Drama-CN) 配置文件
+  │   ├─ script-aligner.md    # 剧本质量检查员配置文件
+  │   └─ script-recorder.md   # 进度记录员配置文件
+  ├─ episodes/                # 剧本正文文件夹（初始为空）
+  │   ├─ EP-01.md        # 第一集
+  │   ├─ EP-02.md        # 第二集
+  │   └─ ...
+  ├─ episode_index.md         # 集目录（初始为空）
+  ├─ character.md             # 人物小传（初始为空）
+  ├─ outline.md               # 剧情简介和故事大纲（初始为空）
+  └─ script.progress.md       # 创作进度记录（初始为空）
 
 [总体规则]
 - 严格按照 故事大纲 → 人物小传 → 集目录 → 剧本正文 的流程创作
@@ -590,26 +593,6 @@ project/
 - 定期（例如每完成10集）触发一次全量对齐检查：由主 Agent 调用 script-aligner 对 outline.md + episode_index.md + 最近10集 EP 文件进行批量检查，并生成汇总报告。
 - 若用户发出 \`/check all\`，则触发手动全量检查；若发出 \`/record now\`，则立即调用 script-recorder 生成一次快照记录。
 `;
-
-    // 创建 main-agent.md 文件节点
-    const fileId = uid("md");
-    const fileName = "main-agent.md";
-
-    // 初始化 main-agent.md 文件存储
-    const key = `fs:${fileId}`;
-    const jsonContent = {
-      type: "doc",
-      content: mainAgentContent.split('\n').map(line => ({
-        type: "paragraph",
-        content: line ? [{ type: "text", text: line }] : []
-      }))
-    };
-
-    window.localStorage.setItem(`${key}:novel-content`, JSON.stringify(jsonContent));
-    window.localStorage.setItem(`${key}:markdown`, mainAgentContent);
-    window.localStorage.setItem(`${key}:html-content`, "");
-
-    const fileNode: FsNode = { id: fileId, type: "file", name: fileName, content: "" };
 
     // 预置 script-aligner.md 内容
     const scriptAlignerContent = `---
@@ -695,25 +678,6 @@ description: 剧本质量检查员，负责对主 Agent 产出的各类文档进
 
 请修改后重新提交检查。`;
 
-    // 创建 script-aligner.md 文件节点
-    const alignerId = uid("md");
-    const alignerName = "script-aligner.md";
-
-    const alignerKey = `fs:${alignerId}`;
-    const alignerJsonContent = {
-      type: "doc",
-      content: scriptAlignerContent.split('\n').map(line => ({
-        type: "paragraph",
-        content: line ? [{ type: "text", text: line }] : []
-      }))
-    };
-
-    window.localStorage.setItem(`${alignerKey}:novel-content`, JSON.stringify(alignerJsonContent));
-    window.localStorage.setItem(`${alignerKey}:markdown`, scriptAlignerContent);
-    window.localStorage.setItem(`${alignerKey}:html-content`, "");
-
-    const alignerNode: FsNode = { id: alignerId, type: "file", name: alignerName, content: "" };
-
     // 预置 script-recorder.md 内容
     const scriptRecorderContent = `---
 name: script-recorder
@@ -780,32 +744,67 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
 - 第1集：强钩子（须在前30秒内完成）
 - 第20集：付费节点（须在付费后立即给出情感回报）`;
 
-    // 创建 script-recorder.md 文件节点
-    const recorderId = uid("md");
-    const recorderName = "script-recorder.md";
+    // 辅助函数：创建文件节点并保存内容
+    const createFileNode = (filename: string, content: string): FsNode => {
+      const fileId = uid("md");
+      const key = `fs:${fileId}`;
+      const jsonContent = {
+        type: "doc",
+        content: content.split('\n').map(line => ({
+          type: "paragraph",
+          content: line ? [{ type: "text", text: line }] : []
+        }))
+      };
 
-    const recorderKey = `fs:${recorderId}`;
-    const recorderJsonContent = {
-      type: "doc",
-      content: scriptRecorderContent.split('\n').map(line => ({
-        type: "paragraph",
-        content: line ? [{ type: "text", text: line }] : []
-      }))
+      window.localStorage.setItem(`${key}:novel-content`, JSON.stringify(jsonContent));
+      window.localStorage.setItem(`${key}:markdown`, content);
+      window.localStorage.setItem(`${key}:html-content`, "");
+
+      return { id: fileId, type: "file", name: filename, content: "" };
     };
 
-    window.localStorage.setItem(`${recorderKey}:novel-content`, JSON.stringify(recorderJsonContent));
-    window.localStorage.setItem(`${recorderKey}:markdown`, scriptRecorderContent);
-    window.localStorage.setItem(`${recorderKey}:html-content`, "");
+    // 1. 创建 agent-settings 文件夹及其内容
+    const agentSettingsFolderId = uid("f");
+    const agentSettingsChildren = [
+      createFileNode("main-agent.md", mainAgentContent),
+      createFileNode("script-aligner.md", scriptAlignerContent),
+      createFileNode("script-recorder.md", scriptRecorderContent)
+    ];
+    const agentSettingsFolder: FsNode = {
+      id: agentSettingsFolderId,
+      type: "folder",
+      name: "agent-settings",
+      children: agentSettingsChildren
+    };
 
-    const recorderNode: FsNode = { id: recorderId, type: "file", name: recorderName, content: "" };
+    // 2. 创建 episodes 文件夹（为空）
+    const episodesFolderId = uid("f");
+    const episodesFolder: FsNode = {
+      id: episodesFolderId,
+      type: "folder",
+      name: "episodes",
+      children: []
+    };
+
+    // 3. 创建根目录下的其他空文件
+    const rootFiles = [
+      createFileNode("episode_index.md", ""),
+      createFileNode("character.md", ""),
+      createFileNode("outline.md", ""),
+      createFileNode("script.progress.md", "")
+    ];
 
     setRoot((prev) => attachNode(prev, parentId, { 
       id, 
       type: "folder", 
       name, 
-      children: [fileNode, alignerNode, recorderNode] 
+      children: [
+        agentSettingsFolder,
+        episodesFolder,
+        ...rootFiles
+      ] 
     }));
-    setExpanded((prev) => new Set(prev).add(parentId).add(id));
+    setExpanded((prev) => new Set(prev).add(parentId).add(id).add(agentSettingsFolderId).add(episodesFolderId));
     setRenaming({ nodeId: id, value: name });
   };
 
