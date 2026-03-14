@@ -12,6 +12,7 @@ import {
   Folder,
   FolderPlus,
   MessageSquare,
+  Pencil,
   Plus,
   Search,
   Settings,
@@ -33,8 +34,9 @@ export type FsNode = {
 
 type ConversationMessage = {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   content: string;
+  actions?: { type: "read" | "write"; path: string }[];
 };
 
 type Conversation = {
@@ -1086,7 +1088,7 @@ Rules:
             { role: "system", content: systemPrompt },
             // 获取当前对话的历史消息
             ...(projectConversations[activeProjectId]?.find(c => c.id === activeConversationId)?.messages.map(m => ({
-              role: m.role,
+              role: m.role === "system" ? "user" : m.role,
               content: m.content
             })) || []),
             { role: "user", content }
@@ -1151,6 +1153,7 @@ Rules:
       const actionRegex = /<file_action\s+type="([^"]+)"\s+path="([^"]+)"(?:\s*\/?>|>(.*?)<\/file_action>)/gs;
       let match;
       const results: string[] = [];
+      const actions: { type: "read" | "write"; path: string }[] = [];
       
       while ((match = actionRegex.exec(fullContent)) !== null) {
           const type = match[1] as "read" | "write";
@@ -1158,6 +1161,7 @@ Rules:
           const content = match[3];
           const result = executeFsAction(type, path, content);
           results.push(`[System] Action: ${type} ${path}\nResult: ${result}`);
+          actions.push({ type, path });
       }
 
       if (results.length > 0) {
@@ -1167,7 +1171,18 @@ Rules:
           ...prev,
           [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
             if (c.id !== activeConversationId) return c;
-            return { ...c, messages: [...c.messages, { id: resultMsgId, role: "user", content: resultContent }] };
+            return { 
+                ...c, 
+                messages: [
+                    ...c.messages, 
+                    { 
+                        id: resultMsgId, 
+                        role: "system", 
+                        content: resultContent,
+                        actions: actions
+                    }
+                ] 
+            };
           }),
         }));
       }
@@ -1597,33 +1612,38 @@ Rules:
             </div>
           ) : (
             <div className="space-y-4">
-            {activeConversation?.messages.map((m) => (
-              <div
-                key={m.id}
-                className={cn(
-                  "max-w-[92%] rounded-xl border p-3 text-[13px] leading-relaxed shadow-sm",
-                  m.role === "user"
-                    ? "ml-auto border-zinc-800 bg-[#252525] text-zinc-200"
-                    : "mr-auto border-zinc-800/70 bg-[#1f1f1f] text-zinc-300",
-                )}
-              >
-                {m.content}
-              </div>
-            ))}
+            {activeConversation?.messages.map((m) => {
+              if (m.role === "system" && m.actions) {
+                return (
+                  <div key={m.id} className="space-y-1.5 px-1 py-2">
+                    {m.actions.map((action, idx) => (
+                      <div key={idx} className="flex items-center gap-2 text-[11px] text-zinc-500">
+                        {action.type === "read" ? <Search size={12} /> : <Pencil size={12} />}
+                        <span>
+                          {action.type === "read" ? "已阅读" : "已写入"}{" "}
+                          <span className="font-medium text-zinc-400">{action.path}</span>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              }
+              return (
+                <div
+                  key={m.id}
+                  className={cn(
+                    "max-w-[92%] rounded-xl border p-3 text-[13px] leading-relaxed shadow-sm",
+                    m.role === "user"
+                      ? "ml-auto border-zinc-800 bg-[#252525] text-zinc-200"
+                      : "mr-auto border-zinc-800/70 bg-[#1f1f1f] text-zinc-300",
+                  )}
+                >
+                  {m.content}
+                </div>
+              );
+            })}
 
             <div className="space-y-1.5 px-1">
-              <div className="flex items-center gap-2 text-[11px] text-zinc-500">
-                <Search size={12} />
-                <span>
-                  已阅读 <span className="font-medium text-zinc-400">about-acme.md</span>
-                </span>
-              </div>
-              <div className="flex items-center gap-2 text-[11px] text-zinc-500">
-                <Search size={12} />
-                <span>
-                  已阅读 <span className="font-medium text-zinc-400">brand-guidelines.pdf</span>
-                </span>
-              </div>
               <div className="flex items-center gap-2 text-[11px] text-zinc-500">
                 <div className="h-3 w-3 animate-spin rounded-full border-2 border-zinc-700 border-t-zinc-400" />
                 <span>
