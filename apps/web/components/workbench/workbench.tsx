@@ -928,6 +928,96 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
 
   const [isGenerating, setIsGenerating] = useState(false);
 
+  // --- File System Capabilities ---
+  const checkFileAccess = (path: string) => {
+    const normalized = path.replace(/\\/g, "/").replace(/^\.\//, "");
+    if (normalized.startsWith("agent-settings/") || normalized.includes("/agent-settings/")) return false;
+    return true;
+  };
+
+  const generateFileTreeContext = (node: FsNode, depth = 0): string => {
+    if (node.id === "root") {
+      return node.children?.map((c) => generateFileTreeContext(c, depth)).join("\n") || "";
+    }
+    const indent = "  ".repeat(depth);
+    let output = `${indent}- ${node.name} (${node.type})`;
+    if (node.type === "folder" && node.children) {
+      output += "\n" + node.children.map((c) => generateFileTreeContext(c, depth + 1)).join("\n");
+    }
+    return output;
+  };
+
+  const executeFsAction = (type: "read" | "write", path: string, content?: string): string => {
+    if (!activeProjectId) return "Error: No active project.";
+    if (!checkFileAccess(path)) return `Error: Access denied to '${path}'.`;
+
+    const parts = path.split("/").filter((p) => p && p !== ".");
+    if (parts.length === 0) return "Error: Invalid path.";
+
+    const findFolderByPath = (startNode: FsNode, pathParts: string[]): FsNode | null => {
+      if (pathParts.length === 0) return startNode;
+      const [currentName, ...rest] = pathParts;
+      const child = startNode.children?.find((c) => c.name === currentName && c.type === "folder");
+      if (!child) return null;
+      return findFolderByPath(child, rest);
+    };
+
+    const projectRoot = findNode(root, activeProjectId)?.node;
+    if (!projectRoot) return "Error: Project root not found.";
+
+    if (type === "write") {
+      const fileName = parts[parts.length - 1];
+      const folderPath = parts.slice(0, -1);
+      
+      let parentNode = projectRoot;
+      if (folderPath.length > 0) {
+        const foundFolder = findFolderByPath(projectRoot, folderPath);
+        if (!foundFolder) return `Error: Folder '${folderPath.join("/")}' not found.`;
+        parentNode = foundFolder;
+      }
+      
+      const existingFile = parentNode.children?.find((c) => c.name === fileName && c.type === "file");
+      const fileContent = content || "";
+      const jsonContent = {
+        type: "doc",
+        content: fileContent.split('\n').map((line) => ({
+          type: "paragraph",
+          content: line ? [{ type: "text", text: line }] : [],
+        })),
+      };
+
+      if (existingFile) {
+        const key = `fs:${existingFile.id}`;
+        window.localStorage.setItem(`${key}:novel-content`, JSON.stringify(jsonContent));
+        window.localStorage.setItem(`${key}:markdown`, fileContent);
+        return `Success: Updated file '${path}'.`;
+      } else {
+        const fileId = uid("md");
+        const key = `fs:${fileId}`;
+        window.localStorage.setItem(`${key}:novel-content`, JSON.stringify(jsonContent));
+        window.localStorage.setItem(`${key}:markdown`, fileContent);
+        window.localStorage.setItem(`${key}:html-content`, "");
+        
+        const newFileNode: FsNode = { id: fileId, type: "file", name: fileName, content: "" };
+        setRoot((prev) => attachNode(prev, parentNode.id, newFileNode));
+        return `Success: Created file '${path}'.`;
+      }
+    } else if (type === "read") {
+        let targetNode = projectRoot;
+        for (const part of parts) {
+            const child = targetNode.children?.find((c) => c.name === part);
+            if (!child) return `Error: File '${path}' not found.`;
+            targetNode = child;
+        }
+        if (targetNode.type !== "file") return `Error: '${path}' is not a file.`;
+        
+        const key = `fs:${targetNode.id}`;
+        const markdown = window.localStorage.getItem(`${key}:markdown`) ?? "";
+        return `Content of '${path}':\n${markdown}`;
+    }
+    return "Error: Unknown action.";
+  };
+
   const sendMessage = async () => {
     if (!activeProjectId) return;
     const content = draft.trim();
@@ -965,6 +1055,25 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
       }
 
       // 4. 调用 OpenAI 兼容接口
+      const projectRoot = activeProjectId ? findNode(root, activeProjectId)?.node : null;
+      const fileTree = projectRoot ? generateFileTreeContext(projectRoot) : "";
+      const systemPrompt = `You have the capability to read and write markdown files.
+Current File Structure:
+${fileTree}
+
+To write a file:
+<file_action type="write" path="folder/filename.md">
+CONTENT
+</file_action>
+
+To read a file:
+<file_action type="read" path="folder/filename.md" />
+
+Rules:
+1. You CANNOT access 'agent-settings' folder.
+2. You CAN create files in the project root and 'episodes' folder.
+3. Path is relative to the current project root.`;
+
       const response = await fetch(`${requestConfig.baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
@@ -974,6 +1083,7 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
         body: JSON.stringify({
           model: requestConfig.modelName,
           messages: [
+            { role: "system", content: systemPrompt },
             // 获取当前对话的历史消息
             ...(projectConversations[activeProjectId]?.find(c => c.id === activeConversationId)?.messages.map(m => ({
               role: m.role,
@@ -1035,6 +1145,31 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
             }
           }
         }
+      }
+
+      // Check for file actions
+      const actionRegex = /<file_action\s+type="([^"]+)"\s+path="([^"]+)"(?:\s*\/?>|>(.*?)<\/file_action>)/gs;
+      let match;
+      const results: string[] = [];
+      
+      while ((match = actionRegex.exec(fullContent)) !== null) {
+          const type = match[1] as "read" | "write";
+          const path = match[2];
+          const content = match[3];
+          const result = executeFsAction(type, path, content);
+          results.push(`[System] Action: ${type} ${path}\nResult: ${result}`);
+      }
+
+      if (results.length > 0) {
+        const resultMsgId = uid("m");
+        const resultContent = results.join("\n\n");
+        setProjectConversations((prev) => ({
+          ...prev,
+          [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
+            if (c.id !== activeConversationId) return c;
+            return { ...c, messages: [...c.messages, { id: resultMsgId, role: "user", content: resultContent }] };
+          }),
+        }));
       }
 
     } catch (error: any) {
