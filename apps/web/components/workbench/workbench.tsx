@@ -952,9 +952,10 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
 
   const executeFsAction = (type: "read" | "write", path: string, content?: string): string => {
     if (!activeProjectId) return "Error: No active project.";
-    if (!checkFileAccess(path)) return `Error: Access denied to '${path}'.`;
+    const normalizedPath = path.replace(/\\/g, "/");
+    if (!checkFileAccess(normalizedPath)) return `Error: Access denied to '${path}'.`;
 
-    const parts = path.split("/").filter((p) => p && p !== ".");
+    const parts = normalizedPath.split("/").filter((p) => p && p !== ".");
     if (parts.length === 0) return "Error: Invalid path.";
 
     const findFolderByPath = (startNode: FsNode, pathParts: string[]): FsNode | null => {
@@ -1014,6 +1015,7 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
 
         const newFileNode: FsNode = { id: fileId, type: "file", name: fileName, content: "" };
         setRoot((prev) => attachNode(prev, parentNode.id, newFileNode));
+        setFileVersions((prev) => ({ ...prev, [fileId]: 1 }));
         return `Success: Created file '${path}'.`;
       }
     } else if (type === "read") {
@@ -1039,7 +1041,9 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
     if (!trimmed || !activeConversationId) return;
     setDraft("");
 
-    const immediateRegex = /<file_action\s+type="([^"]+)"\s+path="([^"]+)"(?:\s*\/?>|>([\s\S]*?)<\/file_action>)/g;
+    // Support both single and double quotes for attributes
+    // Put the content-capturing group FIRST to ensure correct matching
+    const immediateRegex = /<file_action\s+type=["']([^"']+)["']\s+path=["']([^"']+)["'](?:>([\s\S]*?)<\/file_action>|\s*\/?>)/g;
     const immediateResults: string[] = [];
     const immediateActions: { type: "read" | "write"; path: string; ok: boolean }[] = [];
     let immediateMatch: RegExpExecArray | null = null;
@@ -1172,19 +1176,27 @@ Rules:
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let fullContent = "";
+      let buffer = "";
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split("\n").filter((line) => line.trim() !== "");
+        buffer += chunk;
+        
+        const lines = buffer.split("\n");
+        // Keep the last line in buffer as it might be incomplete
+        buffer = lines.pop() ?? "";
 
         for (const line of lines) {
-          if (line === "data: [DONE]") break;
-          if (line.startsWith("data: ")) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          if (trimmed === "data: [DONE]") continue;
+          
+          if (trimmed.startsWith("data: ")) {
             try {
-              const jsonStr = line.slice(6);
+              const jsonStr = trimmed.slice(6);
               const json = JSON.parse(jsonStr);
               const delta = json.choices[0]?.delta?.content || "";
               
@@ -1215,7 +1227,9 @@ Rules:
       // Check for file actions
       // 使用更宽松的正则匹配，特别是针对内容包含换行符的情况
       // [^] matches any character including newline
-      const actionRegex = /<file_action\s+type="([^"]+)"\s+path="([^"]+)"(?:\s*\/?>|>([\s\S]*?)<\/file_action>)/g;
+      // Support both single and double quotes for attributes
+      // Put the content-capturing group FIRST to ensure correct matching
+      const actionRegex = /<file_action\s+type=["']([^"']+)["']\s+path=["']([^"']+)["'](?:>([\s\S]*?)<\/file_action>|\s*\/?>)/g;
       let match;
       const results: string[] = [];
       const actions: { type: "read" | "write"; path: string; ok: boolean }[] = [];
