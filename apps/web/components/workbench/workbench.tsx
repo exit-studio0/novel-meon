@@ -39,8 +39,11 @@ type UserQuestionOption = { label: string; description?: string };
 type UserQuestionPayload = {
   header?: string;
   question: string;
-  options: UserQuestionOption[];
+  kind: "options" | "text";
+  options?: UserQuestionOption[];
   multiSelect?: boolean;
+  placeholder?: string;
+  multiline?: boolean;
 };
 
 type ConversationMessage = {
@@ -556,9 +559,37 @@ description: 将Claude Code的输出转换为适合中国微短剧的创作风�
 - 通过极端事件展示性格，而非缓慢铺垫
 - 配角功能明确，不拖泥带水
 
-## Agent MD 配置
+## 用户启动引导（主 Agent 首轮对话）
 
-[角色]
+当用户开始一个新的短剧项目时，主 Agent **必须先进行创作方向确认**，不要直接生成剧情，而是先询问用户以下问题。
+
+主 Agent 开场白模板：
+
+你是一位**专门创作爆款短剧剧本的编剧助手**，擅长快节奏叙事、密集爽点设计和反转情节编排，让观众一集接一集停不下来。
+
+让我们开始创作你的短剧故事！
+
+开始创作短剧剧本之前，请回答以下问题，帮助我了解你的创作方向：
+
+**Q1：剧本方向（选择1-2个）**
+甜宠【甜蜜互宠】 | 虐恋【虐心情深】 | 萌宝【亲子温馨】 | 团宠【全员宠爱】 | 真假千金【身份互换】 | 女强复仇【逆袭打脸】 | 宫斗【权谋争斗】 | 逆袭【咸鱼翻身】 | 重生【重活一世】 | 战神【王者归来】 | 赘婿【隐忍崛起】 | 神医【妙手回春】 | 鉴宝【慧眼识珠】 | 年代【时代变迁】 | 乡村【田园生活】 | 神豪【一夜暴富】 | 职场【商战风云】 | 高手下山【隐世高人】 | 都市脑洞【奇思妙想】 | 无敌流【开局巅峰】
+
+**Q2：结局类型（选择1个）**
+大团圆【皆大欢喜】 | 开放式【留白想象】 | 反转【意外惊喜】 | 悲剧【遗憾收场】
+
+**Q3：核心爽点（简要描述）**
+请用一句话描述你希望观众在看剧时获得的核心爽感。
+
+示例：
+- 女主疯狂打脸渣男渣女
+- 男主隐藏身份震惊所有人
+- 萌宝助攻撮合父母
+- 落魄少爷逆袭豪门
+
+在收到用户回答后，主 Agent 才进入 **故事大纲 → 人物小传 → 集目录 → 剧本正文** 的创作流程。`;
+
+    // 预置 main-agentch.md 内容
+    const mainAgentChContent = `[角色]
 你是一名专业的短剧编剧，负责创作完整的短剧项目，包括剧情简介、故事大纲、人物小传、集目录和每集正文。你精通剧本写作、人物塑造、情节设计和节奏把控，并通过与两个SubAgent协作确保创作质量。
 
 [任务]
@@ -606,8 +637,7 @@ description: 将Claude Code的输出转换为适合中国微短剧的创作风�
 - 在文档被写入 repository（写入文件系统或数据库）后，必须自动调用 script-recorder 记录变更并更新 script.progress.md。
 - 任何章节关键字（如付费点、主要反转、人物死亡、身份揭露）被新增/修改时，script-recorder 要立即标记为“高影响变更”，并在记录中单独列出影响点与关联集数。
 - 定期（例如每完成10集）触发一次全量对齐检查：由主 Agent 调用 script-aligner 对 outline.md + episode_index.md + 最近10集 EP 文件进行批量检查，并生成汇总报告。
-- 若用户发出 \`/check all\`，则触发手动全量检查；若发出 \`/record now\`，则立即调用 script-recorder 生成一次快照记录。
-`;
+- 若用户发出 \`/check all\`，则触发手动全量检查；若发出 \`/record now\`，则立即调用 script-recorder 生成一次快照记录。`;
 
     // 预置 script-aligner.md 内容
     const scriptAlignerContent = `---
@@ -782,6 +812,7 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
     const agentSettingsFolderId = uid("f");
     const agentSettingsChildren = [
       createFileNode("main-agent.md", mainAgentContent),
+      createFileNode("main-agentch.md", mainAgentChContent),
       createFileNode("script-aligner.md", scriptAlignerContent),
       createFileNode("script-recorder.md", scriptRecorderContent)
     ];
@@ -944,6 +975,7 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
   const [isGenerating, setIsGenerating] = useState(false);
   const [questionSelections, setQuestionSelections] = useState<Record<string, string[]>>({});
   const [questionAnswered, setQuestionAnswered] = useState<Record<string, boolean>>({});
+  const [questionTextInputs, setQuestionTextInputs] = useState<Record<string, string>>({});
 
   // --- File System Capabilities ---
   const checkFileAccess = (path: string, type: FileActionType = "read") => {
@@ -1189,12 +1221,16 @@ To ask the user a multiple-choice question:
 <option label="Option B" description="Short description" />
 </user_question>
 
+To ask the user for text input:
+<user_question header="SHORT_TITLE" question="QUESTION_TEXT" type="text" placeholder="PLACEHOLDER" multiline="false">
+</user_question>
+
 Rules:
 1. You CAN read files in 'agent-settings' folder, but CANNOT write to them.
 2. You CAN create/write files in the project root and 'episodes' folder.
 3. Path is relative to the current project root.
 4. When you want to overwrite a file, use 'write'. When you want to add content to the end of a file, use 'append'. When you want to modify a specific part, use 'replace' (the 'search' attribute is required).
-5. For <user_question>, provide 2-4 options. Use multi="true" only when multiple selections are allowed.`;
+5. For <user_question> with options, provide 2-4 options. Use multi="true" only when multiple selections are allowed.`;
 
       // 构造发送给模型的消息列表
       const conversationHistory = projectConversations[activeProjectId]?.find(c => c.id === activeConversationId)?.messages || [];
@@ -1332,6 +1368,10 @@ Rules:
         const header = getAttr("header") ?? getAttr("title");
         const multiRaw = getAttr("multi") ?? getAttr("multiSelect");
         const multiSelect = multiRaw === "true" || multiRaw === "1";
+        const typeAttr = (getAttr("type") ?? getAttr("kind") ?? getAttr("answer") ?? "").trim();
+        const placeholder = getAttr("placeholder");
+        const multilineRaw = getAttr("multiline");
+        const multiline = multilineRaw === "true" || multilineRaw === "1";
         let questionText = (getAttr("question") ?? "").trim();
 
         const optionRegex = /<option(\s+[^>]+)\s*\/?>/g;
@@ -1361,9 +1401,22 @@ Rules:
           if (inferred) questionText = inferred;
         }
 
-        if (!questionText || options.length < 2) continue;
+        if (!questionText) continue;
 
-        questions.push({ header, question: questionText, options, multiSelect });
+        const kind: "options" | "text" =
+          typeAttr === "text" ? "text" : options.length >= 2 ? "options" : placeholder ? "text" : "text";
+
+        if (kind === "options" && options.length < 2) continue;
+
+        questions.push({
+          header,
+          question: questionText,
+          kind,
+          options: kind === "options" ? options : undefined,
+          multiSelect: kind === "options" ? multiSelect : undefined,
+          placeholder: kind === "text" ? placeholder : undefined,
+          multiline: kind === "text" ? multiline : undefined,
+        });
       }
 
       const displayContent = fullContent.replace(actionRegex, "").replace(questionRegex, "").trim();
@@ -1371,11 +1424,12 @@ Rules:
       const resultMsgId = results.length > 0 ? uid("m") : null;
       const resultContent = results.join("\n\n");
       const questionMessages: ConversationMessage[] = questions.map((q) => {
-        const optionsText = q.options
-          .map((o) => `- ${o.label}${o.description ? `：${o.description}` : ""}`)
-          .join("\n");
         const headerText = q.header ? `${q.header}\n` : "";
-        const multiText = q.multiSelect ? "（可多选）" : "（单选）";
+        const multiText = q.kind === "options" ? (q.multiSelect ? "（可多选）" : "（单选）") : "（输入）";
+        const optionsText =
+          q.kind === "options"
+            ? (q.options ?? []).map((o) => `- ${o.label}${o.description ? `：${o.description}` : ""}`).join("\n")
+            : "- 请输入你的回答";
         return {
           id: uid("m"),
           role: "assistant",
@@ -1827,6 +1881,7 @@ Rules:
                 const answered = !!questionAnswered[m.id];
                 const selected = questionSelections[m.id] ?? [];
                 const multi = !!m.question.multiSelect;
+                const inputValue = questionTextInputs[m.id] ?? "";
                 const toggle = (label: string) => {
                   setQuestionSelections((prev) => {
                     const current = new Set(prev[m.id] ?? []);
@@ -1835,62 +1890,100 @@ Rules:
                     return { ...prev, [m.id]: Array.from(current) };
                   });
                 };
-                const submit = (labels: string[]) => {
+                const submitOptions = (labels: string[]) => {
                   if (labels.length === 0) return;
                   setQuestionAnswered((prev) => ({ ...prev, [m.id]: true }));
                   setQuestionSelections((prev) => ({ ...prev, [m.id]: labels }));
                   sendMessage(`【回答】${m.question.question}\n【选择】${labels.join("、")}`);
+                };
+                const submitText = (value: string) => {
+                  const v = value.trim();
+                  if (!v) return;
+                  setQuestionAnswered((prev) => ({ ...prev, [m.id]: true }));
+                  setQuestionTextInputs((prev) => ({ ...prev, [m.id]: v }));
+                  sendMessage(`【回答】${m.question.question}\n【输入】${v}`);
                 };
 
                 return (
                   <div key={m.id} className="mr-auto max-w-[92%] space-y-2 rounded-xl border border-zinc-800/70 bg-[#1f1f1f] p-3 text-[13px] leading-relaxed shadow-sm">
                     <div className="flex items-center justify-between">
                       <div className="text-[11px] font-medium text-zinc-500">{m.question.header || "提问"}</div>
-                      <div className="text-[10px] text-zinc-600">{multi ? "可多选" : "单选"}</div>
+                      <div className="text-[10px] text-zinc-600">
+                        {m.question.kind === "text" ? "输入" : multi ? "可多选" : "单选"}
+                      </div>
                     </div>
                     <div className="text-zinc-200">{m.question.question}</div>
-                    <div className="flex flex-wrap gap-2">
-                      {m.question.options.map((opt) => {
-                        const isSelected = selected.includes(opt.label);
-                        return (
+                    {m.question.kind === "text" ? (
+                      <div className="space-y-2">
+                        <textarea
+                          value={answered ? (questionTextInputs[m.id] ?? "") : inputValue}
+                          disabled={answered || isGenerating}
+                          placeholder={m.question.placeholder || "请输入…"}
+                          rows={m.question.multiline ? 4 : 2}
+                          onChange={(e) => setQuestionTextInputs((prev) => ({ ...prev, [m.id]: e.target.value }))}
+                          className="w-full resize-none rounded-lg border border-zinc-700 bg-transparent px-3 py-2 text-[12px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20"
+                        />
+                        <div className="flex items-center justify-between">
+                          <div className="text-[11px] text-zinc-500">{answered ? "已提交" : inputValue.trim() ? "可提交" : "请输入"}</div>
                           <button
-                            key={opt.label}
                             type="button"
-                            disabled={answered || isGenerating}
-                            onClick={() => {
-                              if (multi) toggle(opt.label);
-                              else submit([opt.label]);
-                            }}
+                            disabled={answered || isGenerating || !inputValue.trim()}
+                            onClick={() => submitText(inputValue)}
                             className={cn(
-                              "rounded-lg border px-2.5 py-1.5 text-[12px] transition-colors",
-                              isSelected ? "border-blue-500/60 bg-blue-500/10 text-blue-200" : "border-zinc-700 bg-transparent text-zinc-300 hover:bg-zinc-800/40",
-                              answered ? "opacity-60" : null,
+                              "rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors",
+                              answered || isGenerating || !inputValue.trim() ? "cursor-not-allowed bg-zinc-800 text-zinc-600" : "bg-zinc-100 text-black hover:bg-white",
                             )}
-                            title={opt.description || opt.label}
                           >
-                            {opt.label}
+                            提交
                           </button>
-                        );
-                      })}
-                    </div>
-                    {multi ? (
-                      <div className="flex items-center justify-between">
-                        <div className="text-[11px] text-zinc-500">{answered ? `已提交：${selected.join("、")}` : selected.length > 0 ? `已选：${selected.join("、")}` : "请选择"}</div>
-                        <button
-                          type="button"
-                          disabled={answered || isGenerating || selected.length === 0}
-                          onClick={() => submit(selected)}
-                          className={cn(
-                            "rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors",
-                            answered || isGenerating || selected.length === 0 ? "cursor-not-allowed bg-zinc-800 text-zinc-600" : "bg-zinc-100 text-black hover:bg-white",
-                          )}
-                        >
-                          确认
-                        </button>
+                        </div>
                       </div>
-                    ) : answered ? (
-                      <div className="text-[11px] text-zinc-500">已提交：{selected.join("、")}</div>
-                    ) : null}
+                    ) : (
+                      <>
+                        <div className="flex flex-wrap gap-2">
+                          {(m.question.options ?? []).map((opt) => {
+                            const isSelected = selected.includes(opt.label);
+                            return (
+                              <button
+                                key={opt.label}
+                                type="button"
+                                disabled={answered || isGenerating}
+                                onClick={() => {
+                                  if (multi) toggle(opt.label);
+                                  else submitOptions([opt.label]);
+                                }}
+                                className={cn(
+                                  "rounded-lg border px-2.5 py-1.5 text-[12px] transition-colors",
+                                  isSelected ? "border-blue-500/60 bg-blue-500/10 text-blue-200" : "border-zinc-700 bg-transparent text-zinc-300 hover:bg-zinc-800/40",
+                                  answered ? "opacity-60" : null,
+                                )}
+                                title={opt.description || opt.label}
+                              >
+                                {opt.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {multi ? (
+                          <div className="flex items-center justify-between">
+                            <div className="text-[11px] text-zinc-500">{answered ? `已提交：${selected.join("、")}` : selected.length > 0 ? `已选：${selected.join("、")}` : "请选择"}</div>
+                            <button
+                              type="button"
+                              disabled={answered || isGenerating || selected.length === 0}
+                              onClick={() => submitOptions(selected)}
+                              className={cn(
+                                "rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors",
+                                answered || isGenerating || selected.length === 0 ? "cursor-not-allowed bg-zinc-800 text-zinc-600" : "bg-zinc-100 text-black hover:bg-white",
+                              )}
+                            >
+                              确认
+                            </button>
+                          </div>
+                        ) : answered ? (
+                          <div className="text-[11px] text-zinc-500">已提交：{selected.join("、")}</div>
+                        ) : null}
+                      </>
+                    )}
                   </div>
                 );
               }
