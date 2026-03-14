@@ -650,7 +650,7 @@ description: 将Claude Code的输出转换为适合中国微短剧的创作风�
 
 [自动触发规则]
 - 每次主 Agent 生成或修改任何关键文档（outline.md、character.md、episode_index.md、EP-XX.md）前，必须自动调用 script-aligner 进行检查；除非用户明确下达跳过检查的指令。
-- 当 script-aligner 返回 FAIL 时，主 Agent 必须根据 aligner 指示进行修正并重新提交检查；最低循环次数为2次，超过8次则触发人工审阅提示。
+- 当 script-aligner 返回 FAIL 时，主 Agent 必须根据 aligner 指示进行修正并重新提交检查；复检次数最少2次，最多3次；超过则触发人工审阅提示。
 - 在文档被写入 repository（写入文件系统或数据库）后，必须自动调用 script-recorder 记录变更并更新 script.progress.md。
 - 任何章节关键字（如付费点、主要反转、人物死亡、身份揭露）被新增/修改时，script-recorder 要立即标记为“高影响变更”，并在记录中单独列出影响点与关联集数。
 - 定期（例如每完成10集）触发一次全量对齐检查：由主 Agent 调用 script-aligner 对 outline.md + episode_index.md + 最近10集 EP 文件进行批量检查，并生成汇总报告。
@@ -1545,14 +1545,20 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
       draft = await callChatStream(requestConfig, [{ role: "system", content: systemMain }, { role: "user", content: buildMainUser() }], signal);
       draft = draft.trim();
 
-      for (let i = 1; i <= 8; i++) {
-        setAssistant(i === 1 ? "正在进行一致性检查…" : `正在按反馈修订并复检…（第 ${i} 轮）`);
+      const minChecks = 2;
+      const maxChecks = 3;
+
+      for (let i = 1; i <= maxChecks; i++) {
+        setAssistant(i === 1 ? "正在进行一致性检查…" : `正在进行复检…（第 ${i} 次）`);
         const report = await callChatStream(
           requestConfig,
           [{ role: "system", content: systemAligner }, { role: "user", content: buildAlignerUser(draft) }],
           signal,
         );
         const status = extractAlignerStatus(report);
+        if (status === "PASS" && i < minChecks) {
+          continue;
+        }
         if (status === "PASS") {
           const writeResult = executeFsAction("write", targetPath, draft);
           if (writeResult.startsWith("Error:")) {
@@ -1573,11 +1579,12 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
           return { ok: true, report, draft };
         }
 
-        if (i >= 8) {
-          setAssistant(`检查未通过，已达到最大修订次数。\n\n${report.trim()}`);
+        if (i >= maxChecks) {
+          setAssistant(`检查未通过，已达到最大复检次数（${maxChecks}次）。\n\n${report.trim()}`);
           return { ok: false, report, draft };
         }
 
+        setAssistant(`检查未通过，正在修订…（第 ${i} 次）`);
         draft = await callChatStream(
           requestConfig,
           [
@@ -2305,13 +2312,21 @@ Rules:
         return { status, report: report.trim() };
       };
 
+      const minChecks = 2;
+      const maxChecks = 3;
       let finalContent = fullContent;
-      let lastAlignerReport = "";
-      for (let i = 1; i <= 4; i++) {
+      for (let i = 1; i <= maxChecks; i++) {
         const gated = await runAlignerGate(finalContent);
+        if (gated.status === "PASS" && i < minChecks) {
+          updateAssistant(`检查通过，正在进行复检…（第 ${i + 1} 次）`);
+          continue;
+        }
         if (gated.status === "PASS") break;
-        lastAlignerReport = gated.report;
-        updateAssistant(i === 1 ? "检查未通过，正在修订…" : `检查仍未通过，继续修订…（第 ${i} 轮）`);
+        if (i >= maxChecks) {
+          updateAssistant(gated.report || `检查未通过，已达到最大复检次数（${maxChecks}次）。`);
+          return;
+        }
+        updateAssistant(i === 1 ? "检查未通过，正在修订…" : `检查仍未通过，继续修订…（第 ${i} 次）`);
         finalContent = await callChatStream(
           requestConfig,
           [
@@ -2324,19 +2339,13 @@ Rules:
                 "要求：保留原本的展示文本；如需写入文件，继续使用 <file_action>；不要对 agent-settings 做写入。",
                 "",
                 "【script-aligner 反馈】",
-                lastAlignerReport,
+                gated.report,
               ].join("\n"),
             },
           ],
           controller.signal,
           (_d, full) => updateAssistant(full),
         );
-      }
-
-      const gatedFinal = await runAlignerGate(finalContent);
-      if (gatedFinal.status === "FAIL") {
-        updateAssistant(gatedFinal.report || "检查未通过，且无法自动修订到通过状态。");
-        return;
       }
 
       actionRegex.lastIndex = 0;
