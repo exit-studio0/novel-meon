@@ -68,6 +68,7 @@ type Conversation = {
   createdAt: number;
   messages: ConversationMessage[];
   aiTodos?: AiTodoItem[];
+  dramaSetup?: { step: 0 | 1 | 2 | 3; q1?: string[]; q2?: string; q3?: string };
 };
 
 type ContextMenuState = { x: number; y: number; nodeId: string } | null;
@@ -376,6 +377,7 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
   const chatPersistTimerRef = useRef<number | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const pendingWriteConfirmRef = useRef<{ episode: number } | null>(null);
+  const pendingStartupOutlineRef = useRef<{ q1: string[]; q2: string; q3: string } | null>(null);
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
@@ -584,24 +586,24 @@ description: 将Claude Code的输出转换为适合中国微短剧的创作风�
 
 让我们开始创作你的短剧故事！
 
-开始创作短剧剧本之前，请回答以下问题，帮助我了解你的创作方向：
+开始创作短剧剧本之前，我们先做“方向三问”，并且**分三次提问**（一问一答再问下一问），不要一次把三问全部抛给用户。
+
+第1问（先问这一问，等用户回答后再继续）：
 
 **Q1：剧本方向（选择1-2个）**
 甜宠【甜蜜互宠】 | 虐恋【虐心情深】 | 萌宝【亲子温馨】 | 团宠【全员宠爱】 | 真假千金【身份互换】 | 女强复仇【逆袭打脸】 | 宫斗【权谋争斗】 | 逆袭【咸鱼翻身】 | 重生【重活一世】 | 战神【王者归来】 | 赘婿【隐忍崛起】 | 神医【妙手回春】 | 鉴宝【慧眼识珠】 | 年代【时代变迁】 | 乡村【田园生活】 | 神豪【一夜暴富】 | 职场【商战风云】 | 高手下山【隐世高人】 | 都市脑洞【奇思妙想】 | 无敌流【开局巅峰】
 
+第2问（收到 Q1 答案后再问）：
+
 **Q2：结局类型（选择1个）**
 大团圆【皆大欢喜】 | 开放式【留白想象】 | 反转【意外惊喜】 | 悲剧【遗憾收场】
 
-**Q3：核心爽点（简要描述）**
-请用一句话描述你希望观众在看剧时获得的核心爽感。
+第3问（收到 Q2 答案后再问）：
 
-示例：
-- 女主疯狂打脸渣男渣女
-- 男主隐藏身份震惊所有人
-- 萌宝助攻撮合父母
-- 落魄少爷逆袭豪门
+**Q3：核心爽点（一句话）**
+示例：女主当众打脸渣男渣女 / 男主隐藏身份震惊全场 / 萌宝助攻撮合父母 / 落魄少爷逆袭豪门
 
-在收到用户回答后，主 Agent 才进入 **故事大纲 → 人物小传 → 集目录 → 剧本正文** 的创作流程。`;
+在收到三问回答后，主 Agent 才进入 **故事大纲 → 人物小传 → 集目录 → 剧本正文** 的创作流程。`;
 
     // 预置 main-agentch.md 内容
     const mainAgentChContent = `[角色]
@@ -1126,6 +1128,7 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
   };
 
   type DramaCommand =
+    | { kind: "outline"; setup: { q1: string[]; q2: string; q3: string } }
     | { kind: "character" }
     | { kind: "catalog" }
     | { kind: "write"; episode: number; force?: boolean }
@@ -1230,6 +1233,105 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
     const key = `fs:${targetNode.id}`;
     return window.localStorage.getItem(`${key}:markdown`) ?? "";
   };
+
+  type StartupState = { step: 0 | 1 | 2 | 3; q1?: string[]; q2?: string; q3?: string };
+
+  const getStartup = (c: Conversation | null) => c?.dramaSetup as StartupState | undefined;
+
+  const setStartup = (updater: (prev: StartupState) => StartupState) => {
+    if (!activeProjectId || !activeConversationId) return;
+    setProjectConversations((prev) => ({
+      ...prev,
+      [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
+        if (c.id !== activeConversationId) return c;
+        const current = getStartup(c) ?? { step: 0 };
+        return { ...c, dramaSetup: updater(current) };
+      }),
+    }));
+  };
+
+  const pushAssistantQuestion = (q: UserQuestionPayload) => {
+    if (!activeProjectId || !activeConversationId) return;
+    const msg: ConversationMessage = { id: uid("m"), role: "assistant", content: "", question: q };
+    setProjectConversations((prev) => ({
+      ...prev,
+      [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
+        if (c.id !== activeConversationId) return c;
+        return { ...c, messages: [...c.messages, msg] };
+      }),
+    }));
+  };
+
+  const startupQ1Options = useMemo(
+    () => [
+      "甜宠【甜蜜互宠】",
+      "虐恋【虐心情深】",
+      "萌宝【亲子温馨】",
+      "团宠【全员宠爱】",
+      "真假千金【身份互换】",
+      "女强复仇【逆袭打脸】",
+      "宫斗【权谋争斗】",
+      "逆袭【咸鱼翻身】",
+      "重生【重活一世】",
+      "战神【王者归来】",
+      "赘婿【隐忍崛起】",
+      "神医【妙手回春】",
+      "鉴宝【慧眼识珠】",
+      "年代【时代变迁】",
+      "乡村【田园生活】",
+      "神豪【一夜暴富】",
+      "职场【商战风云】",
+      "高手下山【隐世高人】",
+      "都市脑洞【奇思妙想】",
+      "无敌流【开局巅峰】",
+    ],
+    [],
+  );
+
+  const askStartupQ1 = () =>
+    pushAssistantQuestion({
+      header: "创作启动",
+      question: "Q1：剧本方向（选择1-2个）",
+      kind: "options",
+      options: startupQ1Options.map((label) => ({ label })),
+      multiSelect: true,
+    });
+
+  const askStartupQ2 = () =>
+    pushAssistantQuestion({
+      header: "创作启动",
+      question: "Q2：结局类型（选择1个）",
+      kind: "options",
+      options: [
+        { label: "大团圆【皆大欢喜】" },
+        { label: "开放式【留白想象】" },
+        { label: "反转【意外惊喜】" },
+        { label: "悲剧【遗憾收场】" },
+      ],
+      multiSelect: false,
+    });
+
+  const askStartupQ3 = () =>
+    pushAssistantQuestion({
+      header: "创作启动",
+      question: "Q3：核心爽点（一句话）",
+      kind: "text",
+      placeholder: "例如：女主当众打脸渣男渣女",
+      multiline: false,
+    });
+
+  useEffect(() => {
+    if (!activeProjectId || !activeConversationId) return;
+    const c = projectConversations[activeProjectId]?.find((x) => x.id === activeConversationId) ?? null;
+    if (!c) return;
+    if (c.messages.length > 0) return;
+    const outline = getMarkdownByPath("outline.md") ?? "";
+    if (outline.trim()) return;
+    const s = getStartup(c) ?? { step: 0 };
+    if (s.step !== 0) return;
+    setStartup(() => ({ step: 0 }));
+    askStartupQ1();
+  }, [activeProjectId, activeConversationId, projectConversations]);
 
   const listEpisodeMarkdowns = () => {
     if (!activeProjectId) return [];
@@ -1500,6 +1602,37 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
 
       return { ok: false, report: "", draft };
     };
+
+    if (cmd.kind === "outline") {
+      const { q1, q2, q3 } = cmd.setup;
+      await generateAndCheck(
+        "outline.md",
+        () =>
+          [
+            "请基于用户的创作方向回答，先生成剧情简介与故事大纲（outline.md）。",
+            "要求：短剧节奏、冲突密集、反转明确；给出世界观/主题、主线矛盾、主要人物关系、前20集节奏节点（含付费点建议如适用）。",
+            "",
+            "【用户回答】",
+            `Q1：${q1.join("、")}`,
+            `Q2：${q2}`,
+            `Q3：${q3}`,
+            "",
+            "【outline.md（旧）】",
+            outline.trim() ? outline.trim() : "(空)",
+          ].join("\n"),
+        (draft) =>
+          [
+            "请检查将要写入的 outline.md 是否符合短剧创作法则与基本逻辑一致性。",
+            "",
+            "【outline.md（旧）】",
+            outline.trim() ? outline.trim() : "(空)",
+            "",
+            "【outline.md（新草稿）】",
+            draft.trim(),
+          ].join("\n"),
+      );
+      return;
+    }
 
     if (cmd.kind === "character") {
       if (!outline.trim()) {
@@ -1810,6 +1943,39 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
       }),
     }));
 
+    const parseAnswer = (text: string) => {
+      if (!text.startsWith("【回答】")) return null;
+      const q = text.match(/^【回答】([^\n]+)\n/m)?.[1]?.trim();
+      if (!q) return null;
+      const chosen = text.match(/【选择】([^\n]+)/)?.[1]?.trim();
+      const input = text.match(/【输入】([\s\S]+)$/)?.[1]?.trim();
+      return { q, chosen, input };
+    };
+
+    const answer = parseAnswer(content);
+    if (answer?.q === "Q1：剧本方向（选择1-2个）" && answer.chosen) {
+      const labels = answer.chosen.split("、").map((s) => s.trim()).filter(Boolean);
+      setStartup(() => ({ step: 1, q1: labels }));
+      askStartupQ2();
+      return;
+    }
+    if (answer?.q === "Q2：结局类型（选择1个）" && answer.chosen) {
+      const choice = answer.chosen.trim();
+      setStartup((prev) => ({ step: 2, q1: prev.q1 ?? [], q2: choice }));
+      askStartupQ3();
+      return;
+    }
+    if (answer?.q === "Q3：核心爽点（一句话）") {
+      const q3 = (answer.input ?? "").trim();
+      if (q3) {
+        const s = getStartup(activeConversation) ?? { step: 0 };
+        const q1 = s.q1 ?? [];
+        const q2 = s.q2 ?? "";
+        setStartup(() => ({ step: 3, q1, q2, q3 }));
+        pendingStartupOutlineRef.current = { q1, q2, q3 };
+      }
+    }
+
     // 2. 准备 AI 回复的消息占位
     const assistantMsgId = uid("m");
     abortControllerRef.current?.abort();
@@ -1831,6 +1997,13 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
 
       if (!requestConfig || !requestConfig.apiKey) {
         throw new Error("未配置有效的模型或 API Key");
+      }
+
+      const pendingStartup = pendingStartupOutlineRef.current;
+      if (pendingStartup) {
+        pendingStartupOutlineRef.current = null;
+        await runDramaCommand({ kind: "outline", setup: pendingStartup }, requestConfig, controller.signal, assistantMsgId);
+        return;
       }
 
       const pending = pendingWriteConfirmRef.current;
