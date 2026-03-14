@@ -36,7 +36,7 @@ type ConversationMessage = {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
-  actions?: { type: "read" | "write"; path: string; ok: boolean }[];
+  actions?: { type: "read" | "write" | "append"; path: string; ok: boolean }[];
 };
 
 type Conversation = {
@@ -932,9 +932,9 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
   const [isGenerating, setIsGenerating] = useState(false);
 
   // --- File System Capabilities ---
-  const checkFileAccess = (path: string) => {
+  const checkFileAccess = (path: string, type: "read" | "write" = "read") => {
     const normalized = path.replace(/\\/g, "/").replace(/^\.\//, "");
-    if (normalized.startsWith("agent-settings/") || normalized.includes("/agent-settings/")) return false;
+    if (type === "write" && (normalized.startsWith("agent-settings/") || normalized.includes("/agent-settings/"))) return false;
     return true;
   };
 
@@ -950,10 +950,10 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
     return output;
   };
 
-  const executeFsAction = (type: "read" | "write", path: string, content?: string): string => {
+  const executeFsAction = (type: "read" | "write" | "append" | "replace", path: string, content?: string, options?: { search?: string }): string => {
     if (!activeProjectId) return "Error: No active project.";
     const normalizedPath = path.replace(/\\/g, "/");
-    if (!checkFileAccess(normalizedPath)) return `Error: Access denied to '${path}'.`;
+    if (!checkFileAccess(normalizedPath, type)) return `Error: Access denied to '${path}'.`;
 
     const parts = normalizedPath.split("/").filter((p) => p && p !== ".");
     if (parts.length === 0) return "Error: Invalid path.";
@@ -969,7 +969,7 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
     const projectRoot = findNode(root, activeProjectId)?.node;
     if (!projectRoot) return "Error: Project root not found.";
 
-    if (type === "write") {
+    if (type === "write" || type === "append" || type === "replace") {
       const fileName = parts[parts.length - 1];
       const folderPath = parts.slice(0, -1);
       
@@ -985,7 +985,22 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
 
       if (existingFile) {
         const key = `fs:${existingFile.id}`;
-        window.localStorage.setItem(`${key}:markdown`, fileContent);
+        
+        let finalContent = fileContent;
+        if (type === "append") {
+            const currentContent = window.localStorage.getItem(`${key}:markdown`) ?? "";
+            finalContent = currentContent + (currentContent && !currentContent.endsWith("\n") ? "\n" : "") + fileContent;
+        } else if (type === "replace") {
+            const currentContent = window.localStorage.getItem(`${key}:markdown`) ?? "";
+            const searchStr = options?.search;
+            if (!searchStr) return "Error: Missing 'search' attribute for replace action.";
+            if (!currentContent.includes(searchStr)) return `Error: String '${searchStr}' not found in file.`;
+            // Replace only the first occurrence to be safe, or all? usually first is safer for context
+            // Use a callback function for the replacement to prevent special replacement patterns (like $&, $1) from being processed
+            finalContent = currentContent.replace(searchStr, () => fileContent);
+        }
+
+        window.localStorage.setItem(`${key}:markdown`, finalContent);
         // Remove novel-content and html-content to force re-render from markdown
         window.localStorage.removeItem(`${key}:novel-content`);
         window.localStorage.removeItem(`${key}:html-content`);
@@ -993,13 +1008,17 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
         // Dispatch storage event manually for same-window updates
         window.dispatchEvent(new StorageEvent('storage', {
             key: `${key}:markdown`,
-            newValue: fileContent,
+            newValue: finalContent,
             storageArea: window.localStorage
         }));
         
         setFileVersions((prev) => ({ ...prev, [existingFile.id]: (prev[existingFile.id] || 0) + 1 }));
-        return `Success: Updated file '${path}'.`;
+        return `Success: ${type === "append" ? "Appended to" : type === "replace" ? "Replaced content in" : "Updated"} file '${path}'.`;
       } else {
+        if (type === "append" || type === "replace") {
+             if (type === "replace") return `Error: File '${path}' not found for replace action.`;
+            // Treat append as write for new files
+        }
         const fileId = uid("md");
         const key = `fs:${fileId}`;
         window.localStorage.setItem(`${key}:markdown`, fileContent);
@@ -1043,22 +1062,34 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
 
     // Support both single and double quotes for attributes
     // Put the content-capturing group FIRST to ensure correct matching
-    const immediateRegex = /<file_action\s+type=["']([^"']+)["']\s+path=["']([^"']+)["'](?:>([\s\S]*?)<\/file_action>|\s*\/?>)/g;
+    // New regex to be more attribute-agnostic
+    const actionRegex = /<file_action(\s+[^>]+)(?:>([\s\S]*?)<\/file_action>|\s*\/?>)/g;
     const immediateResults: string[] = [];
-    const immediateActions: { type: "read" | "write"; path: string; ok: boolean }[] = [];
+    const immediateActions: { type: "read" | "write" | "append" | "replace"; path: string; ok: boolean }[] = [];
     let immediateMatch: RegExpExecArray | null = null;
-    while ((immediateMatch = immediateRegex.exec(raw)) !== null) {
-      const type = immediateMatch[1] as "read" | "write";
-      const path = immediateMatch[2];
-      const body = immediateMatch[3];
+    while ((immediateMatch = actionRegex.exec(raw)) !== null) {
+      const attrsStr = immediateMatch[1];
+      const body = immediateMatch[2];
+      
+      const getAttr = (name: string) => {
+          const match = attrsStr.match(new RegExp(`${name}=["']([^"']+)["']`));
+          return match ? match[1] : undefined;
+      };
+      
+      const type = getAttr("type") as "read" | "write" | "append" | "replace" | undefined;
+      const path = getAttr("path");
+      const search = getAttr("search"); // for replace
+
+      if (!type || !path) continue;
+
       const cleanBody = body ? body.trim() : undefined;
-      const result = executeFsAction(type, path, cleanBody);
+      const result = executeFsAction(type, path, cleanBody, { search });
       immediateResults.push(`[System] Action: ${type} ${path}\nResult: ${result}`);
       immediateActions.push({ type, path, ok: !result.startsWith("Error:") });
     }
 
     // Replace all matches in the original string with empty string
-    const stripped = raw.replace(immediateRegex, "").trim();
+    const stripped = raw.replace(actionRegex, "").trim();
     const content = stripped;
 
     // Add system message first if there are actions
@@ -1113,23 +1144,33 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
       // 4. 调用 OpenAI 兼容接口
       const projectRoot = activeProjectId ? findNode(root, activeProjectId)?.node : null;
       const fileTree = projectRoot ? generateFileTreeContext(projectRoot) : "";
-      const systemPrompt = `You have the capability to read and write markdown files.
+      const systemPrompt = `You have the capability to read, write, append, and replace content in markdown files.
 Current File Structure:
 ${fileTree}
 
-To write a file:
+To write a file (overwrite):
 <file_action type="write" path="folder/filename.md">
 CONTENT
+</file_action>
+
+To append to a file:
+<file_action type="append" path="folder/filename.md">
+CONTENT_TO_APPEND
+</file_action>
+
+To replace content in a file (can be used to insert):
+<file_action type="replace" path="folder/filename.md" search="STRING_TO_FIND">
+REPLACEMENT_STRING
 </file_action>
 
 To read a file:
 <file_action type="read" path="folder/filename.md" />
 
 Rules:
-1. You CANNOT access 'agent-settings' folder.
-2. You CAN create files in the project root and 'episodes' folder.
+1. You CAN read files in 'agent-settings' folder, but CANNOT write to them.
+2. You CAN create/write files in the project root and 'episodes' folder.
 3. Path is relative to the current project root.
-4. When you want to update a file, just overwrite it with new content.`;
+4. When you want to overwrite a file, use 'write'. When you want to add content to the end of a file, use 'append'. When you want to modify a specific part, use 'replace' (the 'search' attribute is required).`;
 
       // 构造发送给模型的消息列表
       const conversationHistory = projectConversations[activeProjectId]?.find(c => c.id === activeConversationId)?.messages || [];
@@ -1226,22 +1267,31 @@ Rules:
 
       // Check for file actions
       // 使用更宽松的正则匹配，特别是针对内容包含换行符的情况
-      // [^] matches any character including newline
-      // Support both single and double quotes for attributes
-      // Put the content-capturing group FIRST to ensure correct matching
-      const actionRegex = /<file_action\s+type=["']([^"']+)["']\s+path=["']([^"']+)["'](?:>([\s\S]*?)<\/file_action>|\s*\/?>)/g;
+      // New regex to be more attribute-agnostic
+      const actionRegex = /<file_action(\s+[^>]+)(?:>([\s\S]*?)<\/file_action>|\s*\/?>)/g;
       let match;
       const results: string[] = [];
-      const actions: { type: "read" | "write"; path: string; ok: boolean }[] = [];
+      const actions: { type: "read" | "write" | "append" | "replace"; path: string; ok: boolean }[] = [];
       
       while ((match = actionRegex.exec(fullContent)) !== null) {
-          const type = match[1] as "read" | "write";
-          const path = match[2];
-          const content = match[3];
-          // 如果内容存在（写入操作），去除首尾空白，但保留中间格式
-          const cleanContent = content ? content.trim() : undefined;
+          const attrsStr = match[1];
+          const body = match[2];
           
-          const result = executeFsAction(type, path, cleanContent);
+          const getAttr = (name: string) => {
+              const match = attrsStr.match(new RegExp(`${name}=["']([^"']+)["']`));
+              return match ? match[1] : undefined;
+          };
+          
+          const type = getAttr("type") as "read" | "write" | "append" | "replace" | undefined;
+          const path = getAttr("path");
+          const search = getAttr("search"); // for replace
+
+          if (!type || !path) continue;
+
+          // 如果内容存在（写入操作），去除首尾空白，但保留中间格式
+          const cleanContent = body ? body.trim() : undefined;
+          
+          const result = executeFsAction(type, path, cleanContent, { search });
           results.push(`[System] Action: ${type} ${path}\nResult: ${result}`);
           actions.push({ type, path, ok: !result.startsWith("Error:") });
       }
@@ -1701,7 +1751,7 @@ Rules:
                       <div key={idx} className="flex items-center gap-2 text-[11px] text-zinc-500">
                         {action.type === "read" ? <Search size={12} /> : <Pencil size={12} />}
                         <span>
-                          {action.type === "read" ? "已阅读" : "已写入"}{" "}
+                          {action.type === "read" ? "已阅读" : action.type === "append" ? "已追加" : "已写入"}{" "}
                           <span className="font-medium text-zinc-400">{action.path}</span>
                           <span className={cn("ml-2 text-[10px]", action.ok ? "text-emerald-400/70" : "text-rose-400/70")}>
                             {action.ok ? "成功" : "失败"}
