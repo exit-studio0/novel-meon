@@ -116,6 +116,17 @@ const TailwindAdvancedEditor = ({
                 "prose prose-lg dark:prose-invert prose-headings:font-title font-default focus:outline-none max-w-full",
             },
           }}
+          onCreate={({ editor }) => {
+            const markdown = window.localStorage.getItem(`${storageKey}:markdown`);
+            const json = window.localStorage.getItem(`${storageKey}:novel-content`);
+            if (!json && markdown) {
+              editor.commands.setContent(markdown);
+              // 立即保存生成的 JSON，避免下次加载闪烁
+              const newJson = editor.getJSON();
+              window.localStorage.setItem(`${storageKey}:novel-content`, JSON.stringify(newJson));
+            }
+            setCharsCount(editor.storage.characterCount.words());
+          }}
           onUpdate={({ editor }) => {
             onMarkdownChange?.(editor.storage.markdown.getMarkdown());
             debouncedUpdates(editor);

@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import TailwindAdvancedEditor from "@/components/tailwind/advanced-editor";
+import PlainMarkdownEditor from "@/components/workbench/plain-markdown-editor";
 import {
   ArrowUp,
   ChevronDown,
@@ -241,6 +241,7 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
   const modelSelectorRef = useRef<HTMLDivElement>(null);
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [fileVersions, setFileVersions] = useState<Record<string, number>>({});
 
   const chatModels = useMemo(() => {
     if (!user?.registry_config) return [];
@@ -980,25 +981,21 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
       
       const existingFile = parentNode.children?.find((c) => c.name === fileName && c.type === "file");
       const fileContent = content || "";
-      const jsonContent = {
-        type: "doc",
-        content: fileContent.split('\n').map((line) => ({
-          type: "paragraph",
-          content: line ? [{ type: "text", text: line }] : [],
-        })),
-      };
 
       if (existingFile) {
         const key = `fs:${existingFile.id}`;
-        window.localStorage.setItem(`${key}:novel-content`, JSON.stringify(jsonContent));
         window.localStorage.setItem(`${key}:markdown`, fileContent);
+        // Remove novel-content and html-content to force re-render from markdown
+        window.localStorage.removeItem(`${key}:novel-content`);
+        window.localStorage.removeItem(`${key}:html-content`);
+        setFileVersions((prev) => ({ ...prev, [existingFile.id]: (prev[existingFile.id] || 0) + 1 }));
         return `Success: Updated file '${path}'.`;
       } else {
         const fileId = uid("md");
         const key = `fs:${fileId}`;
-        window.localStorage.setItem(`${key}:novel-content`, JSON.stringify(jsonContent));
         window.localStorage.setItem(`${key}:markdown`, fileContent);
-        window.localStorage.setItem(`${key}:html-content`, "");
+        window.localStorage.removeItem(`${key}:novel-content`);
+        window.localStorage.removeItem(`${key}:html-content`);
         
         const newFileNode: FsNode = { id: fileId, type: "file", name: fileName, content: "" };
         setRoot((prev) => attachNode(prev, parentNode.id, newFileNode));
@@ -1529,11 +1526,10 @@ Rules:
           {activeFile?.type === "file" && activeStorageKey ? (
             <div className="flex h-full min-w-0 flex-col">
               <div className="flex-1 min-w-0 overflow-auto p-4">
-                <TailwindAdvancedEditor
-                  key={activeStorageKey}
+                <PlainMarkdownEditor
+                  key={`${activeStorageKey}-${fileVersions[activeFileId!] || 0}`}
                   storageKey={activeStorageKey}
                   wrapperClassName="max-w-none"
-                  editorClassName="max-w-none sm:mb-0 sm:rounded-none sm:border-0 sm:shadow-none bg-transparent"
                 />
               </div>
             </div>
