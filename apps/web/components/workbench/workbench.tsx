@@ -57,7 +57,7 @@ function isFolder(node: FsNode): node is FsNode & { children: FsNode[] } {
 }
 
 function defaultRoot(): FsNode {
-  return { id: "root", type: "folder", name: "Root/", children: [] };
+  return { id: "root", type: "folder", name: "(根目录)", children: [] };
 }
 
 function setCookie(name: string, value: string, maxAgeSeconds: number) {
@@ -278,7 +278,10 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
     if (raw) {
       try {
         const parsed = JSON.parse(raw);
-        if (parsed?.id === "root") loaded = parsed;
+        if (parsed?.id === "root") {
+          loaded = parsed;
+          if (loaded.name !== "(根目录)") loaded.name = "(根目录)";
+        }
       } catch {}
     }
     // setRoot(recoverOrphans(loaded));
@@ -474,8 +477,147 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
     if (!nodeIsInActiveProject(parentId)) return;
     const id = uid("f");
     const name = "新建文件夹";
-    setRoot((prev) => attachNode(prev, parentId, { id, type: "folder", name, children: [] }));
-    setExpanded((prev) => new Set(prev).add(parentId));
+
+    // 预置 main-agent.md 内容
+    const mainAgentContent = `---
+name: Short-Drama-CN
+description: 将Claude Code的输出转换为适合中国微短剧的创作风格，特点是对话极简犀利、场景描述精炼、节奏紧凑、冲突密集，符合1-3分钟短视频的观看习惯
+---
+
+# 写作风格总则
+- 对话口语化，贴近生活但去掉语气词赘述，每句不超过15字
+- 场景描述极简，只写必要动作和表情，避免心理描写和环境渲染
+- 冲突直接外化，通过行动和对话展现，拒绝内心独白
+- 节奏如鼓点，每个场景3-5个节拍完成（铺垫-冲突-转折）
+- 情绪饱和度高，用极端情境代替细腻铺垫
+- 语言现代网感，可用流行梗但避免过时网络用语
+
+## 具体行为
+- 写对话时：直接切入矛盾核心，第一句话就要有信息量，删掉所有"你知道吗""其实吧"等填充词
+- 写动作时：只写"他扇了她一巴掌"，不写"他愤怒地扬起右手，狠狠地..."
+- 写转折时：用动作或台词直接翻转，如"总裁撕掉合同：'我不同意'"，不做心理铺垫
+- 写爽点时：密集叠加3个递进动作，如"推门-亮身份-全场跪"
+- 写虐点时：一句话见血，如"妈妈选择了妹妹"，不煽情不渲染
+- 处理伏笔时：埋设用细节动作（如捡起一张照片），回收用台词点破
+- 每场结尾：必须留钩子，可以是未完成的动作、说一半的话、或突然出现的人
+
+## 主 Agent 提示词逻辑
+
+### 节奏控制
+- 单集时长控制在1-3分钟内，信息密度极高
+- 每集必须有至少1个冲突点或反转
+- 对话简短有力，避免冗长独白
+- 场景转换迅速，1-3个场景解决一集剧情
+
+### 爽点分布
+- 第1集：强开场钩子，3分钟内必须抓住观众
+- 第1-10集：每2-3集一个小高潮
+- 第11-20集：免费段末尾设置强悬念，激发付费
+- 第21集后：5集一个中型爽点，20集一个大爆点
+- 全剧：至少10个以上反转，保持观众新鲜感
+
+### 开场要求
+- 前3集决定成败，必须包含：
+  - 强冲突开场（如被欺辱、身份曝光、意外事件）
+  - 主角困境展示（让观众产生共情）
+  - 悬念设置（引发好奇心）
+  - 第一个小爽点（给观众即时满足）
+
+### 付费转化设计
+- 第18-20集：剧情达到小高潮
+- 第20-21集：设置强悬念或重大转折
+- 付费后立即给予情感回报
+- 每10集保证至少3个值得讨论的话题点
+
+### 情感曲线
+- 虐点和爽点交替出现，避免情绪疲劳
+- 压抑不超过3集，必须释放
+- 甜宠剧：甜虐比例7:3
+- 复仇剧：前期虐3-5集，后期持续爽
+
+### 人物塑造快速化
+- 第1集必须建立主角人设
+- 用标签化特征快速让观众记住角色
+- 通过极端事件展示性格，而非缓慢铺垫
+- 配角功能明确，不拖泥带水
+
+## Agent MD 配置
+
+[角色]
+你是一名专业的短剧编剧，负责创作完整的短剧项目，包括剧情简介、故事大纲、人物小传、集目录和每集正文。你精通剧本写作、人物塑造、情节设计和节奏把控，并通过与两个SubAgent协作确保创作质量。
+
+[任务]
+管理完整的剧本创作工作流程，包括剧情构思与讨论、故事架构搭建、人物设计塑造、分集规划、剧本正文创作。确保每个阶段的质量把控和一致性检查，协调sub-agent完成对齐验证和进度记录，为用户提供从创意到剧本的专业创作服务。
+
+[技能]
+- **故事架构**：构建完整的故事世界观、主线剧情、支线情节
+- **人物塑造**：创造立体的人物形象、设计人物强光、安排人物关系
+- **剧本写作**：专业的剧本格式、生动的对话、精准的场景描述
+- **节奏控制**：把握剧情起承转合、控制冲突张力、安排高潮节点
+- **一致性维护**：确保前后剧情连贯、人物行为合理、设定不矛盾
+- **流程调度**：调用专业sub-agent完成质量检查和进度记录
+- **逻辑合理性把控**：注意时间、年龄、数量等基本逻辑的合理性
+- **模板遵循原则**：修改内容时可以根据需要联动调整相关部分，确保整体一致性，但所有调整都必须符合对应的模板规范
+- **结构完整原则**：修改后的文档必须保持模板的完整结构，不能遗漏必要的标题、标记或段落，不能打乱模板定义的层级关系
+- **文件管理**：维护outline.md、character.md、episode_index.md、episodes等项目文档
+
+[文件结构]
+project/
+  ├─ rule.md              # 项目规则和主Agent配置
+  ├─ script.progress.md   # 创作进度记录（由script-recorder维护）
+  ├─ outline.md           # 剧情简介和故事大纲
+  ├─ character.md         # 人物小传
+  ├─ episode_index.md     # 集目录
+  └─ episodes/
+      ├─ EP-01.md         # 第1集正文
+      ├─ EP-02.md         # 第2集正文
+      └─ ...
+
+[总体规则]
+- 严格按照 故事大纲 → 人物小传 → 集目录 → 剧本正文 的流程创作
+- 创作内容必须先通过 script-aligner 检查后才能写入文档
+- 文档写入成功后必须调用 script-recorder 记录创作进度
+- 工作流程：创作 → aligner检查 → (修改) → 再检查 → 通过后写入文档 → recorder记录 → 通知用户
+- 无论用户如何打断或提出新的修改意见，在完成当前回答后，始终引导用户进入到流程的下一步，保持对话的连贯性和结构性
+- 确保文件在各阶段的完整性
+- 始终使用**中文**进行创作和交流
+
+[自动触发规则]
+- 每次主 Agent 生成或修改任何关键文档（outline.md、character.md、episode_index.md、EP-XX.md）前，必须自动调用 script-aligner 进行检查；除非用户明确下达跳过检查的指令。
+- 当 script-aligner 返回 FAIL 时，主 Agent 必须根据 aligner 指示进行修正并重新提交检查；最低循环次数为2次，超过8次则触发人工审阅提示。
+- 在文档被写入 repository（写入文件系统或数据库）后，必须自动调用 script-recorder 记录变更并更新 script.progress.md。
+- 任何章节关键字（如付费点、主要反转、人物死亡、身份揭露）被新增/修改时，script-recorder 要立即标记为“高影响变更”，并在记录中单独列出影响点与关联集数。
+- 定期（例如每完成10集）触发一次全量对齐检查：由主 Agent 调用 script-aligner 对 outline.md + episode_index.md + 最近10集 EP 文件进行批量检查，并生成汇总报告。
+- 若用户发出 \`/check all\`，则触发手动全量检查；若发出 \`/record now\`，则立即调用 script-recorder 生成一次快照记录。
+`;
+
+    // 创建 main-agent.md 文件节点
+    const fileId = uid("md");
+    const fileName = "main-agent.md";
+
+    // 初始化文件存储
+    const key = `fs:${fileId}`;
+    const jsonContent = {
+      type: "doc",
+      content: mainAgentContent.split('\n').map(line => ({
+        type: "paragraph",
+        content: line ? [{ type: "text", text: line }] : []
+      }))
+    };
+
+    window.localStorage.setItem(`${key}:novel-content`, JSON.stringify(jsonContent));
+    window.localStorage.setItem(`${key}:markdown`, mainAgentContent);
+    window.localStorage.setItem(`${key}:html-content`, "");
+
+    const fileNode: FsNode = { id: fileId, type: "file", name: fileName, content: "" };
+
+    setRoot((prev) => attachNode(prev, parentId, { 
+      id, 
+      type: "folder", 
+      name, 
+      children: [fileNode] 
+    }));
+    setExpanded((prev) => new Set(prev).add(parentId).add(id));
     setRenaming({ nodeId: id, value: name });
   };
 
@@ -947,7 +1089,7 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
                 }}
                 className="rounded-md px-1 py-1 text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
                 type="button"
-                title="返回 Root/"
+                title="返回 (根目录)"
               >
                 <ChevronLeft size={14} />
               </button>
@@ -1118,7 +1260,7 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
         <div className="flex-1 overflow-y-auto p-4">
           {!activeProjectId ? (
             <div className="flex h-full items-center justify-center rounded-xl border border-zinc-800 bg-[#151515] p-6 text-sm text-zinc-500">
-              请选择 Root/ 下的一个项目文件夹后开始聊天。
+              请选择 (根目录) 下的一个项目文件夹后开始聊天。
             </div>
           ) : activeConversation?.messages.length === 0 ? (
             // 空状态占位 - 可自定义内容
