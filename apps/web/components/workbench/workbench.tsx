@@ -34,11 +34,21 @@ export type FsNode = {
 
 type FileActionType = "read" | "write" | "append" | "replace";
 
+type UserQuestionOption = { label: string; description?: string };
+
+type UserQuestionPayload = {
+  header?: string;
+  question: string;
+  options: UserQuestionOption[];
+  multiSelect?: boolean;
+};
+
 type ConversationMessage = {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
   actions?: { type: FileActionType; path: string; ok: boolean }[];
+  question?: UserQuestionPayload;
 };
 
 type Conversation = {
@@ -932,6 +942,8 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
   };
 
   const [isGenerating, setIsGenerating] = useState(false);
+  const [questionSelections, setQuestionSelections] = useState<Record<string, string[]>>({});
+  const [questionAnswered, setQuestionAnswered] = useState<Record<string, boolean>>({});
 
   // --- File System Capabilities ---
   const checkFileAccess = (path: string, type: FileActionType = "read") => {
@@ -1056,12 +1068,12 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
     return "Error: Unknown action.";
   };
 
-  const sendMessage = async () => {
+  const sendMessage = async (overrideRaw?: string) => {
     if (!activeProjectId) return;
-    const raw = draft;
+    const raw = overrideRaw ?? draft;
     const trimmed = raw.trim();
     if (!trimmed || !activeConversationId) return;
-    setDraft("");
+    if (!overrideRaw) setDraft("");
 
     // Support both single and double quotes for attributes
     // Put the content-capturing group FIRST to ensure correct matching
@@ -1149,10 +1161,12 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
       const fileTree = projectRoot ? generateFileTreeContext(projectRoot) : "";
       const systemPrompt = `You have the capability to read, write, append, and replace content in markdown files.
 Current File Structure:
+You can also ask the user a multiple-choice question when you need clarification.
 ${fileTree}
 
 To write a file (overwrite):
 <file_action type="write" path="folder/filename.md">
+CONTENT
 CONTENT
 </file_action>
 
@@ -1169,11 +1183,18 @@ REPLACEMENT_STRING
 To read a file:
 <file_action type="read" path="folder/filename.md" />
 
+To ask the user a multiple-choice question:
+<user_question header="SHORT_TITLE" question="QUESTION_TEXT" multi="false">
+<option label="Option A" description="Short description" />
+<option label="Option B" description="Short description" />
+</user_question>
+
 Rules:
 1. You CAN read files in 'agent-settings' folder, but CANNOT write to them.
 2. You CAN create/write files in the project root and 'episodes' folder.
 3. Path is relative to the current project root.
-4. When you want to overwrite a file, use 'write'. When you want to add content to the end of a file, use 'append'. When you want to modify a specific part, use 'replace' (the 'search' attribute is required).`;
+4. When you want to overwrite a file, use 'write'. When you want to add content to the end of a file, use 'append'. When you want to modify a specific part, use 'replace' (the 'search' attribute is required).
+5. For <user_question>, provide 2-4 options. Use multi="true" only when multiple selections are allowed.`;
 
       // 构造发送给模型的消息列表
       const conversationHistory = projectConversations[activeProjectId]?.find(c => c.id === activeConversationId)?.messages || [];
@@ -1268,13 +1289,12 @@ Rules:
         }
       }
 
-      // Check for file actions
-      // 使用更宽松的正则匹配，特别是针对内容包含换行符的情况
-      // New regex to be more attribute-agnostic
+      const questionRegex = /<user_question(\s+[^>]+)>([\s\S]*?)<\/user_question>/g;
       const actionRegex = /<file_action(\s+[^>]+)(?:>([\s\S]*?)<\/file_action>|\s*\/?>)/g;
       let match;
       const results: string[] = [];
       const actions: { type: FileActionType; path: string; ok: boolean }[] = [];
+      const questions: UserQuestionPayload[] = [];
       
       while ((match = actionRegex.exec(fullContent)) !== null) {
           const attrsStr = match[1];
@@ -1299,28 +1319,84 @@ Rules:
           actions.push({ type, path, ok: !result.startsWith("Error:") });
       }
 
-      if (results.length > 0) {
-        const resultMsgId = uid("m");
-        const resultContent = results.join("\n\n");
-        setProjectConversations((prev) => ({
-          ...prev,
-          [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
-            if (c.id !== activeConversationId) return c;
-            return { 
-                ...c, 
-                messages: [
-                    ...c.messages, 
-                    { 
-                        id: resultMsgId, 
-                        role: "system", 
-                        content: resultContent,
-                        actions: actions
-                    }
-                ] 
-            };
-          }),
-        }));
+      let qMatch: RegExpExecArray | null = null;
+      while ((qMatch = questionRegex.exec(fullContent)) !== null) {
+        const attrsStr = qMatch[1];
+        const body = qMatch[2] ?? "";
+
+        const getAttr = (name: string) => {
+          const match = attrsStr.match(new RegExp(`${name}=["']([^"']+)["']`));
+          return match ? match[1] : undefined;
+        };
+
+        const header = getAttr("header") ?? getAttr("title");
+        const multiRaw = getAttr("multi") ?? getAttr("multiSelect");
+        const multiSelect = multiRaw === "true" || multiRaw === "1";
+        let questionText = (getAttr("question") ?? "").trim();
+
+        const optionRegex = /<option(\s+[^>]+)\s*\/?>/g;
+        const options: UserQuestionOption[] = [];
+        let oMatch: RegExpExecArray | null = null;
+        while ((oMatch = optionRegex.exec(body)) !== null) {
+          const optAttrs = oMatch[1];
+          const label = optAttrs.match(/label=["']([^"']+)["']/)?.[1]?.trim();
+          if (!label) continue;
+          const description = optAttrs.match(/description=["']([^"']+)["']/)?.[1]?.trim();
+          options.push({ label, description });
+        }
+
+        if (options.length === 0) {
+          const rawOptions = (getAttr("options") ?? "").trim();
+          if (rawOptions) {
+            rawOptions
+              .split("|")
+              .map((s) => s.trim())
+              .filter(Boolean)
+              .forEach((label) => options.push({ label }));
+          }
+        }
+
+        if (!questionText) {
+          const inferred = body.replace(optionRegex, "").trim();
+          if (inferred) questionText = inferred;
+        }
+
+        if (!questionText || options.length < 2) continue;
+
+        questions.push({ header, question: questionText, options, multiSelect });
       }
+
+      const displayContent = fullContent.replace(actionRegex, "").replace(questionRegex, "").trim();
+
+      const resultMsgId = results.length > 0 ? uid("m") : null;
+      const resultContent = results.join("\n\n");
+      const questionMessages: ConversationMessage[] = questions.map((q) => {
+        const optionsText = q.options
+          .map((o) => `- ${o.label}${o.description ? `：${o.description}` : ""}`)
+          .join("\n");
+        const headerText = q.header ? `${q.header}\n` : "";
+        const multiText = q.multiSelect ? "（可多选）" : "（单选）";
+        return {
+          id: uid("m"),
+          role: "assistant",
+          content: `【提问】${headerText}${q.question}${multiText}\n【选项】\n${optionsText}`,
+          question: q,
+        };
+      });
+
+      setProjectConversations((prev) => ({
+        ...prev,
+        [activeProjectId]: (prev[activeProjectId] ?? []).map((c) => {
+          if (c.id !== activeConversationId) return c;
+          const updated = c.messages.map((m) => (m.id === assistantMsgId ? { ...m, content: displayContent } : m));
+          const extras: ConversationMessage[] = [];
+          if (results.length > 0 && resultMsgId) {
+            extras.push({ id: resultMsgId, role: "system", content: resultContent, actions });
+          }
+          extras.push(...questionMessages);
+          return { ...c, messages: [...updated, ...extras] };
+        }),
+      }));
 
     } catch (error: any) {
       console.error("Chat error:", error);
@@ -1747,6 +1823,77 @@ Rules:
           ) : (
             <div className="space-y-4">
             {activeConversation?.messages.map((m) => {
+              if (m.question) {
+                const answered = !!questionAnswered[m.id];
+                const selected = questionSelections[m.id] ?? [];
+                const multi = !!m.question.multiSelect;
+                const toggle = (label: string) => {
+                  setQuestionSelections((prev) => {
+                    const current = new Set(prev[m.id] ?? []);
+                    if (current.has(label)) current.delete(label);
+                    else current.add(label);
+                    return { ...prev, [m.id]: Array.from(current) };
+                  });
+                };
+                const submit = (labels: string[]) => {
+                  if (labels.length === 0) return;
+                  setQuestionAnswered((prev) => ({ ...prev, [m.id]: true }));
+                  setQuestionSelections((prev) => ({ ...prev, [m.id]: labels }));
+                  sendMessage(`【回答】${m.question.question}\n【选择】${labels.join("、")}`);
+                };
+
+                return (
+                  <div key={m.id} className="mr-auto max-w-[92%] space-y-2 rounded-xl border border-zinc-800/70 bg-[#1f1f1f] p-3 text-[13px] leading-relaxed shadow-sm">
+                    <div className="flex items-center justify-between">
+                      <div className="text-[11px] font-medium text-zinc-500">{m.question.header || "提问"}</div>
+                      <div className="text-[10px] text-zinc-600">{multi ? "可多选" : "单选"}</div>
+                    </div>
+                    <div className="text-zinc-200">{m.question.question}</div>
+                    <div className="flex flex-wrap gap-2">
+                      {m.question.options.map((opt) => {
+                        const isSelected = selected.includes(opt.label);
+                        return (
+                          <button
+                            key={opt.label}
+                            type="button"
+                            disabled={answered || isGenerating}
+                            onClick={() => {
+                              if (multi) toggle(opt.label);
+                              else submit([opt.label]);
+                            }}
+                            className={cn(
+                              "rounded-lg border px-2.5 py-1.5 text-[12px] transition-colors",
+                              isSelected ? "border-blue-500/60 bg-blue-500/10 text-blue-200" : "border-zinc-700 bg-transparent text-zinc-300 hover:bg-zinc-800/40",
+                              answered ? "opacity-60" : null,
+                            )}
+                            title={opt.description || opt.label}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {multi ? (
+                      <div className="flex items-center justify-between">
+                        <div className="text-[11px] text-zinc-500">{answered ? `已提交：${selected.join("、")}` : selected.length > 0 ? `已选：${selected.join("、")}` : "请选择"}</div>
+                        <button
+                          type="button"
+                          disabled={answered || isGenerating || selected.length === 0}
+                          onClick={() => submit(selected)}
+                          className={cn(
+                            "rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors",
+                            answered || isGenerating || selected.length === 0 ? "cursor-not-allowed bg-zinc-800 text-zinc-600" : "bg-zinc-100 text-black hover:bg-white",
+                          )}
+                        >
+                          确认
+                        </button>
+                      </div>
+                    ) : answered ? (
+                      <div className="text-[11px] text-zinc-500">已提交：{selected.join("、")}</div>
+                    ) : null}
+                  </div>
+                );
+              }
               if (m.role === "system" && m.actions) {
                 return (
                   <div key={m.id} className="space-y-1.5 px-1 py-2">
@@ -1869,7 +2016,7 @@ Rules:
                 </div>
               </div>
               <button
-                onClick={sendMessage}
+                onClick={() => sendMessage()}
                 disabled={!activeProjectId || isGenerating || !draft.trim()}
                 className={cn(
                   "flex h-8 w-8 items-center justify-center rounded-full transition-all",
