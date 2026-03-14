@@ -18,6 +18,15 @@ export default function PlainMarkdownEditor({ storageKey, wrapperClassName }: Pl
   useEffect(() => {
     const existing = window.localStorage.getItem(keyMarkdown) ?? "";
     setValue(existing);
+    
+    // 监听 storage 变化，以便在其他地方修改了 localStorage 时同步更新（主要针对 AI 写入）
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === keyMarkdown && e.newValue !== null) {
+        setValue(e.newValue);
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, [keyMarkdown]);
 
   const persist = useDebouncedCallback((next: string) => {

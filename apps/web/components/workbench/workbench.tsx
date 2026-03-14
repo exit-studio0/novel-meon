@@ -988,6 +988,14 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
         // Remove novel-content and html-content to force re-render from markdown
         window.localStorage.removeItem(`${key}:novel-content`);
         window.localStorage.removeItem(`${key}:html-content`);
+        
+        // Dispatch storage event manually for same-window updates
+        window.dispatchEvent(new StorageEvent('storage', {
+            key: `${key}:markdown`,
+            newValue: fileContent,
+            storageArea: window.localStorage
+        }));
+        
         setFileVersions((prev) => ({ ...prev, [existingFile.id]: (prev[existingFile.id] || 0) + 1 }));
         return `Success: Updated file '${path}'.`;
       } else {
@@ -997,6 +1005,13 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
         window.localStorage.removeItem(`${key}:novel-content`);
         window.localStorage.removeItem(`${key}:html-content`);
         
+        // Dispatch storage event manually for same-window updates
+        window.dispatchEvent(new StorageEvent('storage', {
+            key: `${key}:markdown`,
+            newValue: fileContent,
+            storageArea: window.localStorage
+        }));
+
         const newFileNode: FsNode = { id: fileId, type: "file", name: fileName, content: "" };
         setRoot((prev) => attachNode(prev, parentNode.id, newFileNode));
         return `Success: Created file '${path}'.`;
@@ -1024,7 +1039,7 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
     if (!trimmed || !activeConversationId) return;
     setDraft("");
 
-    const immediateRegex = /<file_action\s+type="([^"]+)"\s+path="([^"]+)"(?:\s*\/?>|>(.*?)<\/file_action>)/gs;
+    const immediateRegex = /<file_action\s+type="([^"]+)"\s+path="([^"]+)"(?:\s*\/?>|>([\s\S]*?)<\/file_action>)/g;
     const immediateResults: string[] = [];
     const immediateActions: { type: "read" | "write"; path: string; ok: boolean }[] = [];
     let immediateMatch: RegExpExecArray | null = null;
@@ -1032,14 +1047,17 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
       const type = immediateMatch[1] as "read" | "write";
       const path = immediateMatch[2];
       const body = immediateMatch[3];
-      const result = executeFsAction(type, path, body);
+      const cleanBody = body ? body.trim() : undefined;
+      const result = executeFsAction(type, path, cleanBody);
       immediateResults.push(`[System] Action: ${type} ${path}\nResult: ${result}`);
       immediateActions.push({ type, path, ok: !result.startsWith("Error:") });
     }
 
+    // Replace all matches in the original string with empty string
     const stripped = raw.replace(immediateRegex, "").trim();
-    const content = immediateActions.length > 0 ? stripped : trimmed;
+    const content = stripped;
 
+    // Add system message first if there are actions
     if (immediateActions.length > 0) {
       const resultMsgId = uid("m");
       const resultContent = immediateResults.join("\n\n");
@@ -1055,6 +1073,7 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
       }));
     }
 
+    // Only proceed to send message to AI if there is actual content left
     if (!content) return;
 
     // 1. 添加用户消息到界面
@@ -1105,7 +1124,28 @@ To read a file:
 Rules:
 1. You CANNOT access 'agent-settings' folder.
 2. You CAN create files in the project root and 'episodes' folder.
-3. Path is relative to the current project root.`;
+3. Path is relative to the current project root.
+4. When you want to update a file, just overwrite it with new content.`;
+
+      // 构造发送给模型的消息列表
+      const conversationHistory = projectConversations[activeProjectId]?.find(c => c.id === activeConversationId)?.messages || [];
+      const messagesToSend = [
+        { role: "system", content: systemPrompt },
+        ...conversationHistory.map(m => {
+          // 如果是 system 消息且包含 actions，将其转换为 user 消息，以便模型知道操作结果
+          if (m.role === "system" && m.content) {
+             return { role: "user", content: m.content };
+          }
+          // 普通消息直接透传
+          return {
+            role: m.role === "system" ? "user" : m.role,
+            content: m.content
+          };
+        }),
+        // 如果当前这次发送还包含了刚刚执行的 system action 结果，也需要加进去
+        ...(immediateResults.length > 0 ? [{ role: "user", content: immediateResults.join("\n\n") }] : []),
+        { role: "user", content }
+      ];
 
       const response = await fetch(`${requestConfig.baseUrl}/chat/completions`, {
         method: "POST",
@@ -1115,15 +1155,7 @@ Rules:
         },
         body: JSON.stringify({
           model: requestConfig.modelName,
-          messages: [
-            { role: "system", content: systemPrompt },
-            // 获取当前对话的历史消息
-            ...(projectConversations[activeProjectId]?.find(c => c.id === activeConversationId)?.messages.map(m => ({
-              role: m.role === "system" ? "user" : m.role,
-              content: m.content
-            })) || []),
-            { role: "user", content }
-          ],
+          messages: messagesToSend,
           stream: true, // 启用流式传输
           ...requestConfig.params,
         }),
@@ -1181,7 +1213,9 @@ Rules:
       }
 
       // Check for file actions
-      const actionRegex = /<file_action\s+type="([^"]+)"\s+path="([^"]+)"(?:\s*\/?>|>(.*?)<\/file_action>)/gs;
+      // 使用更宽松的正则匹配，特别是针对内容包含换行符的情况
+      // [^] matches any character including newline
+      const actionRegex = /<file_action\s+type="([^"]+)"\s+path="([^"]+)"(?:\s*\/?>|>([\s\S]*?)<\/file_action>)/g;
       let match;
       const results: string[] = [];
       const actions: { type: "read" | "write"; path: string; ok: boolean }[] = [];
@@ -1190,7 +1224,10 @@ Rules:
           const type = match[1] as "read" | "write";
           const path = match[2];
           const content = match[3];
-          const result = executeFsAction(type, path, content);
+          // 如果内容存在（写入操作），去除首尾空白，但保留中间格式
+          const cleanContent = content ? content.trim() : undefined;
+          
+          const result = executeFsAction(type, path, cleanContent);
           results.push(`[System] Action: ${type} ${path}\nResult: ${result}`);
           actions.push({ type, path, ok: !result.startsWith("Error:") });
       }
