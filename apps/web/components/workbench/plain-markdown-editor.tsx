@@ -3,6 +3,7 @@
 import { cn } from "@/lib/utils";
 import { Check, Loader2 } from "lucide-react";
 import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useDebouncedCallback } from "use-debounce";
 
@@ -115,12 +116,11 @@ export default function PlainMarkdownEditor({ storageKey, wrapperClassName }: Pl
         />
       ) : (
         <div className="min-h-[500px] w-full rounded-lg border border-zinc-800 bg-transparent p-4">
-          <div className="prose prose-invert max-w-none">
-            <Markdown>{value}</Markdown>
+          <div className="prose prose-invert max-w-none overflow-x-auto">
+            <Markdown remarkPlugins={[remarkGfm]}>{value}</Markdown>
           </div>
         </div>
       )}
     </div>
   );
 }
-

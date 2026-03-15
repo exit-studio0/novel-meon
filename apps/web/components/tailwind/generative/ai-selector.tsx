@@ -8,6 +8,7 @@ import { useEditor } from "novel";
 import { addAIHighlight } from "novel";
 import { useState } from "react";
 import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
 import { Button } from "../ui/button";
 import CrazySpinner from "../ui/icons/crazy-spinner";
@@ -48,7 +49,7 @@ export function AISelector({ onOpenChange }: AISelectorProps) {
         <div className="flex max-h-[400px]">
           <ScrollArea>
             <div className="prose p-2 px-4 prose-sm">
-              <Markdown>{completion}</Markdown>
+              <Markdown remarkPlugins={[remarkGfm]}>{completion}</Markdown>
             </div>
           </ScrollArea>
         </div>
