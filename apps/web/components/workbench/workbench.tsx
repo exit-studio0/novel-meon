@@ -3309,7 +3309,7 @@ Rules:
                   </div>
                 );
               }
-              if (m.role === "system" && m.actions) {
+              if (m.role === "system" && m.actions && m.actions.length > 0) {
                 return (
                   <div key={m.id} className="space-y-1.5 px-1 py-2">
                     {m.actions.map((action, idx) => (
@@ -3330,6 +3330,13 @@ Rules:
                         </span>
                       </div>
                     ))}
+                  </div>
+                );
+              }
+              if (m.role === "system" && m.content) {
+                return (
+                  <div key={m.id} className="max-w-[92%] rounded-xl border border-zinc-800/70 bg-[#1f1f1f] p-3 text-[13px] leading-relaxed text-zinc-500 shadow-sm mr-auto">
+                    <pre className="whitespace-pre-wrap font-mono text-[11px]">{m.content}</pre>
                   </div>
                 );
               }
