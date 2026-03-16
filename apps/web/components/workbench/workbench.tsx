@@ -250,7 +250,8 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
   const [root, setRoot] = useState<FsNode>(() => defaultRoot());
   const [isLoaded, setIsLoaded] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["root"]));
-  const [activeFileId, setActiveFileId] = useState<string | null>(null);
+  const [openFileIdsByProject, setOpenFileIdsByProject] = useState<Record<string, string[]>>({});
+  const [activeFileIdByProject, setActiveFileIdByProject] = useState<Record<string, string | null>>({});
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [renaming, setRenaming] = useState<{ nodeId: string; value: string } | null>(null);
   const [moveTarget, setMoveTarget] = useState<{ nodeId: string; targetFolderId: string } | null>(null);
@@ -350,6 +351,16 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
     return conversations.find((c) => c.id === activeConversationId) ?? null;
   }, [activeProjectId, conversations, activeConversationId]);
 
+  const activeFileId = useMemo(() => {
+    if (!activeProjectId) return null;
+    return activeFileIdByProject[activeProjectId] ?? null;
+  }, [activeProjectId, activeFileIdByProject]);
+
+  const openTabs = useMemo(() => {
+    if (!activeProjectId) return [];
+    return openFileIdsByProject[activeProjectId] ?? [];
+  }, [activeProjectId, openFileIdsByProject]);
+
   const activeFile = useMemo(() => {
     if (!activeFileId) return null;
     return findNode(root, activeFileId)?.node ?? null;
@@ -379,6 +390,95 @@ export default function Workbench({ user }: { user?: UserSettingsRow }) {
   const pendingWriteConfirmRef = useRef<{ episode: number } | null>(null);
   const pendingStartupOutlineRef = useRef<{ q1: string[]; q2: string; q3: string } | null>(null);
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const openFileInTab = (fileId: string) => {
+    if (!activeProjectId) return;
+    setOpenFileIdsByProject((prev) => {
+      const current = prev[activeProjectId] ?? [];
+      if (current.includes(fileId)) return prev;
+      return { ...prev, [activeProjectId]: [...current, fileId] };
+    });
+    setActiveFileIdByProject((prev) => ({ ...prev, [activeProjectId]: fileId }));
+  };
+
+  const activateTab = (fileId: string) => {
+    if (!activeProjectId) return;
+    setActiveFileIdByProject((prev) => ({ ...prev, [activeProjectId]: fileId }));
+  };
+
+  const closeTab = (fileId: string) => {
+    if (!activeProjectId) return;
+    const pid = activeProjectId;
+    setOpenFileIdsByProject((prev) => {
+      const current = prev[pid] ?? [];
+      const idx = current.indexOf(fileId);
+      if (idx === -1) return prev;
+      const nextTabs = current.filter((x) => x !== fileId);
+      if (fileId === activeFileId) {
+        const nextActive = nextTabs[idx] ?? nextTabs[idx - 1] ?? null;
+        setActiveFileIdByProject((p) => ({ ...p, [pid]: nextActive }));
+      }
+      return { ...prev, [pid]: nextTabs };
+    });
+  };
+
+  const removeFileFromAllTabs = (fileId: string) => {
+    setOpenFileIdsByProject((prev) => {
+      const entries = Object.entries(prev).map(([pid, ids]) => [pid, (ids ?? []).filter((x) => x !== fileId)] as const);
+      return Object.fromEntries(entries);
+    });
+    setActiveFileIdByProject((prev) => {
+      const next: Record<string, string | null> = { ...prev };
+      for (const [pid, active] of Object.entries(prev)) {
+        if (active === fileId) next[pid] = null;
+      }
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    const raw = window.localStorage.getItem("meon:tabs:v1");
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as {
+        v: number;
+        openFileIdsByProject?: Record<string, string[]>;
+        activeFileIdByProject?: Record<string, string | null>;
+      };
+      if (parsed?.v !== 1) return;
+      if (parsed.openFileIdsByProject) setOpenFileIdsByProject(parsed.openFileIdsByProject);
+      if (parsed.activeFileIdByProject) setActiveFileIdByProject(parsed.activeFileIdByProject);
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    const payload = {
+      v: 1,
+      openFileIdsByProject,
+      activeFileIdByProject,
+    };
+    window.localStorage.setItem("meon:tabs:v1", JSON.stringify(payload));
+  }, [openFileIdsByProject, activeFileIdByProject]);
+
+  useEffect(() => {
+    if (!activeProjectId) return;
+    const pid = activeProjectId;
+    const current = openFileIdsByProject[pid] ?? [];
+    const filtered = current.filter((id) => {
+      const found = findNode(root, id);
+      return !!found && found.node.type === "file" && nodeIsInActiveProject(id);
+    });
+    const same =
+      filtered.length === current.length && filtered.every((id, idx) => id === current[idx]);
+    if (!same) {
+      setOpenFileIdsByProject((prev) => ({ ...prev, [pid]: filtered }));
+    }
+    const active = activeFileIdByProject[pid] ?? null;
+    const nextActive = active && filtered.includes(active) ? active : filtered[0] ?? null;
+    if (nextActive !== active) {
+      setActiveFileIdByProject((prev) => ({ ...prev, [pid]: nextActive }));
+    }
+  }, [root, activeProjectId, openFileIdsByProject, activeFileIdByProject]);
 
   useEffect(() => {
     const fromLocalStorageRaw = window.localStorage.getItem("meon:chat:v1");
@@ -878,7 +978,7 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
     const name = "新建文档.md";
     setRoot((prev) => attachNode(prev, parentId, { id, type: "file", name, content: "" }));
     setExpanded((prev) => new Set(prev).add(parentId));
-    setActiveFileId(id);
+    openFileInTab(id);
     setRenaming({ nodeId: id, value: name });
     const key = `fs:${id}`;
     window.localStorage.setItem(`${key}:novel-content`, JSON.stringify(emptyEditorContent));
@@ -895,13 +995,13 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
       window.localStorage.removeItem(`${key}:novel-content`);
       window.localStorage.removeItem(`${key}:markdown`);
     }
+    removeFileFromAllTabs(id);
     setRoot((prev) => removeNode(prev, id));
     setExpanded((prev) => {
       const next = new Set(prev);
       next.delete(id);
       return next;
     });
-    setActiveFileId((prev) => (prev === id ? null : prev));
   };
 
   const commitRename = (nodeId: string, value: string) => {
@@ -977,7 +1077,7 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
     };
     setRoot((prev) => attachNode(prev, targetFolderId, fileNode));
     setExpanded((prev) => new Set(prev).add(targetFolderId));
-    setActiveFileId(orphanId);
+    openFileInTab(orphanId);
   };
 
   const deleteOrphanFile = (orphanId: string) => {
@@ -2732,7 +2832,6 @@ Rules:
             if (isDisabled) return;
             if (isProjectFolder && !activeProjectId) {
               setActiveProjectId(node.id);
-              setActiveFileId(null);
               setExpanded((prev) => new Set(prev).add("root").add(node.id));
               return;
             }
@@ -2808,7 +2907,7 @@ Rules:
               type="button"
               onClick={() => {
                 if (isDisabled2) return;
-                setActiveFileId(c.id);
+                openFileInTab(c.id);
               }}
               onContextMenu={(e) => {
                 e.preventDefault();
@@ -2848,7 +2947,6 @@ Rules:
               <button
                 onClick={() => {
                   setActiveProjectId(null);
-                  setActiveFileId(null);
                   setDraft("");
                 }}
                 className="rounded-md px-1 py-1 text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
@@ -2927,28 +3025,55 @@ Rules:
             <span className="truncate">Workbench</span>
           </div>
           <div className="flex items-center gap-2 px-2 text-zinc-600">
-            <button className="rounded p-1 hover:bg-zinc-800/60 hover:text-zinc-300" type="button">
+            <button
+              className="rounded p-1 hover:bg-zinc-800/60 hover:text-zinc-300"
+              type="button"
+              onClick={() => {
+                if (activeFileId) closeTab(activeFileId);
+              }}
+              title="关闭当前标签"
+            >
               <X size={14} />
             </button>
           </div>
         </div>
 
         <div className="flex h-9 shrink-0 items-center overflow-x-auto border-b border-zinc-800 bg-[#121212]">
-          <div className="flex h-full items-center gap-2 border-r border-zinc-800 bg-[#0d0d0d] px-4 text-xs text-zinc-300">
-            {activeFile ? (
-              <>
-                <span className="text-blue-400">{fileIcon(activeFile.name)}</span>
-                <span className="truncate">{activeFile.name}</span>
-                <X
-                  size={12}
-                  className="ml-1 cursor-pointer text-zinc-600 hover:text-zinc-300"
-                  onClick={() => setActiveFileId(null)}
-                />
-              </>
-            ) : (
-              <span className="text-zinc-500">未选择文件</span>
-            )}
-          </div>
+          {openTabs.length === 0 ? (
+            <div className="flex h-full flex-1 items-center px-4 text-xs text-zinc-500">未打开文件</div>
+          ) : (
+            openTabs.map((id) => {
+              const found = findNode(root, id);
+              const node = found?.node;
+              if (!node || node.type !== "file") return null;
+              const isActive = id === activeFileId;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => activateTab(id)}
+                  className={cn(
+                    "flex h-full items-center gap-2 border-r border-zinc-800 px-4 text-xs",
+                    isActive ? "bg-[#0d0d0d] text-zinc-200" : "bg-transparent text-zinc-500 hover:bg-zinc-800/40 hover:text-zinc-300",
+                  )}
+                >
+                  <span className={cn("shrink-0", isActive ? "text-blue-400" : "text-zinc-600")}>{fileIcon(node.name)}</span>
+                  <span className="max-w-[160px] truncate">{node.name}</span>
+                  <span
+                    className="ml-1 inline-flex h-4 w-4 items-center justify-center rounded text-zinc-600 hover:bg-zinc-800/60 hover:text-zinc-300"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      closeTab(id);
+                    }}
+                    title="关闭"
+                  >
+                    <X size={12} />
+                  </span>
+                </button>
+              );
+            })
+          )}
           <div className="h-full flex-1 border-b border-zinc-800" />
         </div>
 
