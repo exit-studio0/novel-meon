@@ -14,12 +14,15 @@ export async function getUserSettings(): Promise<UserSettingsRow | null> {
 }
 
 export async function getUserSettingsWithReason(): Promise<UserSettingsAuthResult> {
-  const cookieStore = await cookies()
-  const headerStore = await headers()
-  const host = headerStore.get('host') ?? 'unknown-host'
-  const cookieNames = cookieStore.getAll().map((c) => c.name)
-  const supabaseCookieNames = cookieNames.filter((name) => name.startsWith('sb-'))
-  const cookieDebug = `host=${host}; totalCookies=${cookieNames.length}; supabaseCookies=${supabaseCookieNames.join(',') || 'none'}`
+  let cookieDebug = ''
+  if (process.env.NODE_ENV !== 'production') {
+    const cookieStore = await cookies()
+    const headerStore = await headers()
+    const host = headerStore.get('host') ?? 'unknown-host'
+    const cookieNames = cookieStore.getAll().map((c) => c.name)
+    const supabaseCookieNames = cookieNames.filter((name) => name.startsWith('sb-'))
+    cookieDebug = `host=${host}; totalCookies=${cookieNames.length}; supabaseCookies=${supabaseCookieNames.join(',') || 'none'}`
+  }
 
   const supabase = await createClient()
 
@@ -35,7 +38,7 @@ export async function getUserSettingsWithReason(): Promise<UserSettingsAuthResul
     return {
       settings: null,
       reason: '鉴权失败：无法读取当前登录态',
-      detail: `${authError.message} (status: ${authError.status ?? 'unknown'}); ${cookieDebug}`,
+      detail: `${authError.message} (status: ${authError.status ?? 'unknown'})${cookieDebug ? `; ${cookieDebug}` : ''}`,
     }
   }
 
@@ -43,7 +46,7 @@ export async function getUserSettingsWithReason(): Promise<UserSettingsAuthResul
     return {
       settings: null,
       reason: '未检测到登录用户',
-      detail: `通常是跨子域 Cookie 未带上，或主站登录态尚未同步到 novel 子域。${cookieDebug}`,
+      detail: `通常是跨子域 Cookie 未带上，或主站登录态尚未同步到 novel 子域。${cookieDebug ? ` ${cookieDebug}` : ''}`,
     }
   }
 

@@ -23,6 +23,13 @@ interface SettingsModalProps {
   onDeleteOrphan?: (id: string) => void;
 }
 
+function maskApiKey(apiKey: string) {
+  const normalized = (apiKey || "").trim();
+  if (!normalized) return "";
+  if (normalized.length <= 8) return "********";
+  return `${normalized.slice(0, 3)}••••••••••••••••${normalized.slice(-4)}`;
+}
+
 const ApiKeyDisplay = ({ apiKey }: { apiKey: string }) => {
   const [showKey, setShowKey] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -38,7 +45,7 @@ const ApiKeyDisplay = ({ apiKey }: { apiKey: string }) => {
       <div className="text-xs text-neutral-400 font-mono truncate select-all flex-1">
         {showKey ? apiKey : (
           <span className="flex items-center gap-1">
-            {apiKey.slice(0, 3)}••••••••••••••••{apiKey.slice(-4)}
+            {maskApiKey(apiKey)}
             <span className="text-neutral-600 ml-1 hidden sm:inline">(已配置)</span>
           </span>
         )}
@@ -184,7 +191,14 @@ export const SettingsModal = ({ onClose, user, root, onRecover, onDeleteOrphan }
                             (user?.registry_config?.models || [])
                               .some((m: any) => m.providerId === p.id && m.type === 'chat')
                           )
-                          .map((provider: any) => (
+                          .map((provider: any) => {
+                            const providerModels = (user?.registry_config?.models || []).filter(
+                              (m: any) => m.providerId === provider.id && m.type === 'chat'
+                            );
+                            const modelLevelApiKey = providerModels.find((m: any) => Boolean(m.apiKey))?.apiKey;
+                            const effectiveApiKey = provider.apiKey || modelLevelApiKey;
+
+                            return (
                           <div key={provider.id} className="p-4 rounded-lg bg-neutral-900 border border-neutral-800">
                             <div className="flex items-center justify-between mb-3">
                               <div className="flex items-center gap-2">
@@ -192,6 +206,11 @@ export const SettingsModal = ({ onClose, user, root, onRecover, onDeleteOrphan }
                                 {provider.isBuiltIn && (
                                   <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-500/10 text-blue-400 font-medium border border-blue-500/20">
                                     内置
+                                  </span>
+                                )}
+                                {!provider.apiKey && modelLevelApiKey && (
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] bg-purple-500/10 text-purple-300 font-medium border border-purple-500/20">
+                                    模型级 Key
                                   </span>
                                 )}
                               </div>
@@ -207,8 +226,8 @@ export const SettingsModal = ({ onClose, user, root, onRecover, onDeleteOrphan }
                               </div>
                               <div>
                                 <label className="block text-xs text-neutral-500 mb-1.5">API Key</label>
-                                {provider.apiKey ? (
-                                  <ApiKeyDisplay apiKey={provider.apiKey} />
+                                {effectiveApiKey ? (
+                                  <ApiKeyDisplay apiKey={effectiveApiKey} />
                                 ) : (
                                   <div className="px-3 py-2 rounded bg-neutral-950 border border-neutral-800 text-xs text-neutral-600 italic">
                                     未配置
@@ -217,7 +236,7 @@ export const SettingsModal = ({ onClose, user, root, onRecover, onDeleteOrphan }
                               </div>
                             </div>
                           </div>
-                        ))}
+                        )})}
 
                         {(!user?.registry_config?.providers || user.registry_config.providers.length === 0) && (
                           <div className="text-center py-8 text-sm text-neutral-500">
