@@ -1,5 +1,6 @@
 import { createClient } from '@/utils/supabase/server'
 import type { UserSettingsRow } from '@/types/settings'
+import { cookies, headers } from 'next/headers'
 
 export type UserSettingsAuthResult = {
   settings: UserSettingsRow | null
@@ -13,6 +14,13 @@ export async function getUserSettings(): Promise<UserSettingsRow | null> {
 }
 
 export async function getUserSettingsWithReason(): Promise<UserSettingsAuthResult> {
+  const cookieStore = await cookies()
+  const headerStore = await headers()
+  const host = headerStore.get('host') ?? 'unknown-host'
+  const cookieNames = cookieStore.getAll().map((c) => c.name)
+  const supabaseCookieNames = cookieNames.filter((name) => name.startsWith('sb-'))
+  const cookieDebug = `host=${host}; totalCookies=${cookieNames.length}; supabaseCookies=${supabaseCookieNames.join(',') || 'none'}`
+
   const supabase = await createClient()
 
   // 1. 获取当前用户信息 (自动携带主站的 Cookie)
@@ -27,7 +35,7 @@ export async function getUserSettingsWithReason(): Promise<UserSettingsAuthResul
     return {
       settings: null,
       reason: '鉴权失败：无法读取当前登录态',
-      detail: `${authError.message} (status: ${authError.status ?? 'unknown'})`,
+      detail: `${authError.message} (status: ${authError.status ?? 'unknown'}); ${cookieDebug}`,
     }
   }
 
@@ -35,7 +43,7 @@ export async function getUserSettingsWithReason(): Promise<UserSettingsAuthResul
     return {
       settings: null,
       reason: '未检测到登录用户',
-      detail: '通常是跨子域 Cookie 未带上，或主站登录态尚未同步到 novel 子域。',
+      detail: `通常是跨子域 Cookie 未带上，或主站登录态尚未同步到 novel 子域。${cookieDebug}`,
     }
   }
 
