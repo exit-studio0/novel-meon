@@ -1,6 +1,48 @@
 import { createServerClient } from '@supabase/ssr'
 import { cookies } from 'next/headers'
 
+type CookieItem = { name: string; value: string }
+
+function getExpectedSupabaseCookieBaseName() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  if (!url) return null
+
+  try {
+    const host = new URL(url).hostname
+    const projectRef = host.split('.')[0]
+    if (!projectRef) return null
+    return `sb-${projectRef}-auth-token`
+  } catch {
+    return null
+  }
+}
+
+function withSupabaseCookieAlias(cookies: CookieItem[]) {
+  const expectedBase = getExpectedSupabaseCookieBaseName()
+  if (!expectedBase) return cookies
+
+  const hasExpected = cookies.some(
+    (cookie) => cookie.name === expectedBase || cookie.name.startsWith(`${expectedBase}.`)
+  )
+  if (hasExpected) return cookies
+
+  const fallbackBase = cookies.find((cookie) =>
+    /^sb-.+-auth-token$/.test(cookie.name)
+  )
+  if (!fallbackBase) return cookies
+
+  const aliasCookies: CookieItem[] = [{ name: expectedBase, value: fallbackBase.value }]
+  const fallbackPrefix = `${fallbackBase.name}.`
+  const chunkAliases = cookies
+    .filter((cookie) => cookie.name.startsWith(fallbackPrefix))
+    .map((cookie) => ({
+      name: cookie.name.replace(fallbackBase.name, expectedBase),
+      value: cookie.value,
+    }))
+
+  return [...cookies, ...aliasCookies, ...chunkAliases]
+}
+
 export async function createClient() {
   const cookieStore = await cookies()
 
@@ -10,7 +52,7 @@ export async function createClient() {
     {
       cookies: {
         getAll() {
-          return cookieStore.getAll()
+          return withSupabaseCookieAlias(cookieStore.getAll())
         },
         setAll(cookiesToSet) {
           try {
