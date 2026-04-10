@@ -1,19 +1,42 @@
 import { createClient } from '@/utils/supabase/server'
 import type { UserSettingsRow } from '@/types/settings'
 
+export type UserSettingsAuthResult = {
+  settings: UserSettingsRow | null
+  reason?: string
+  detail?: string
+}
+
 export async function getUserSettings(): Promise<UserSettingsRow | null> {
+  const result = await getUserSettingsWithReason()
+  return result.settings
+}
+
+export async function getUserSettingsWithReason(): Promise<UserSettingsAuthResult> {
   const supabase = await createClient()
 
   // 1. 获取当前用户信息 (自动携带主站的 Cookie)
   const { data: { user }, error: authError } = await supabase.auth.getUser()
 
-  if (authError || !user) {
+  if (authError) {
     console.warn('[settings] User not authenticated via shared cookie.', {
       error: authError?.message,
       code: authError?.status,
       cause: authError?.cause
     })
-    return null;
+    return {
+      settings: null,
+      reason: '鉴权失败：无法读取当前登录态',
+      detail: `${authError.message} (status: ${authError.status ?? 'unknown'})`,
+    }
+  }
+
+  if (!user) {
+    return {
+      settings: null,
+      reason: '未检测到登录用户',
+      detail: '通常是跨子域 Cookie 未带上，或主站登录态尚未同步到 novel 子域。',
+    }
   }
 
   console.log('[settings] Successfully authenticated user:', user.id)
@@ -27,7 +50,11 @@ export async function getUserSettings(): Promise<UserSettingsRow | null> {
 
   if (error) {
     console.error('Failed to fetch user settings:', error.message)
-    return null;
+    return {
+      settings: null,
+      reason: '已登录，但读取用户配置失败',
+      detail: error.message,
+    }
   }
 
   // 3. 如果用户已登录但没有 settings 数据，返回一个默认结构
@@ -35,6 +62,7 @@ export async function getUserSettings(): Promise<UserSettingsRow | null> {
   if (!data) {
     console.warn('[settings] User authenticated but no settings found. Returning default.');
     return {
+      settings: {
         user_id: user.id,
         email: user.email,
         user_metadata: user.user_metadata,
@@ -44,15 +72,18 @@ export async function getUserSettings(): Promise<UserSettingsRow | null> {
             activeModels: { chat: '', image: '', video: '' }
         },
         jimeng_config: {}
-    };
+      },
+    }
   }
 
   // 3. 返回强类型数据
   return {
-    user_id: user.id,
-    email: user.email,
-    user_metadata: user.user_metadata,
-    registry_config: data.registry_config as UserSettingsRow['registry_config'],
-    jimeng_config: data.jimeng_config as UserSettingsRow['jimeng_config']
+    settings: {
+      user_id: user.id,
+      email: user.email,
+      user_metadata: user.user_metadata,
+      registry_config: data.registry_config as UserSettingsRow['registry_config'],
+      jimeng_config: data.jimeng_config as UserSettingsRow['jimeng_config']
+    },
   }
 }
