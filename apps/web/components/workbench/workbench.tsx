@@ -33,6 +33,7 @@ export type FsNode = {
 };
 
 type FileActionType = "read" | "write" | "append" | "replace";
+type AgentActionType = "aligner" | "recorder";
 
 type UserQuestionOption = { label: string; description?: string };
 
@@ -750,7 +751,7 @@ description: 将Claude Code的输出转换为适合中国微短剧的创作风�
 
 [自动触发规则]
 - 每次主 Agent 生成或修改任何关键文档（outline.md、character.md、episode_index.md、EP-XX.md）前，必须自动调用 script-aligner 进行检查；除非用户明确下达跳过检查的指令。
-- 当 script-aligner 返回 FAIL 时，主 Agent 必须根据 aligner 指示进行修正并重新提交检查；通常检查1次，必要时最多复检2次；仅在明确 FAIL 时进入修订，第2次仍 FAIL 则强制通过并附带建议。
+- 当 script-aligner 返回 FAIL 时，主 Agent 必须根据 aligner 指示进行修正并重新提交检查；通常检查1次，必要时最多复检2次；仅在明确 FAIL 时进入修订，第2次仍 FAIL 则强制通过并附带建议，允许Agent根据此建议最后修改，不再检查。
 - 在文档被写入 repository（写入文件系统或数据库）后，必须自动调用 script-recorder 记录变更并更新 script.progress.md。
 - 任何章节关键字（如付费点、主要反转、人物死亡、身份揭露）被新增/修改时，script-recorder 要立即标记为“高影响变更”，并在记录中单独列出影响点与关联集数。
 - 定期（例如每完成10集）触发一次全量对齐检查：由主 Agent 调用 script-aligner 对 outline.md + episode_index.md + 最近10集 EP 文件进行批量检查，并生成汇总报告。
@@ -1548,6 +1549,112 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
 
   const isAlignerPassLike = (status: AlignerStatus) => status !== "FAIL";
 
+  const sanitizeAssistantToolOutput = (text: string) => {
+    if (!text) return "";
+
+    let sanitized = text;
+    const blockTags = ["file_action", "user_question", "todo_action", "agent_action"];
+
+    for (const tag of blockTags) {
+      const blockRegex = new RegExp(`<${tag}(\\s+[^>]+)?>([\\s\\S]*?)<\\/${tag}>`, "g");
+      sanitized = sanitized.replace(blockRegex, "");
+    }
+
+    const selfClosingRegex = /<(?:file_action|todo_action|agent_action)(\s+[^>]+)?\s*\/>/g;
+    sanitized = sanitized.replace(selfClosingRegex, "");
+
+    let cutoff = -1;
+    for (const tag of blockTags) {
+      cutoff = Math.max(cutoff, sanitized.lastIndexOf(`<${tag}`));
+    }
+    if (cutoff >= 0) {
+      sanitized = sanitized.slice(0, cutoff);
+    }
+
+    return sanitized.trim();
+  };
+
+  const getStoryDocsSnapshot = () => {
+    const outline = getMarkdownByPath("outline.md") ?? "";
+    const character = getMarkdownByPath("character.md") ?? "";
+    const episodeIndex = getMarkdownByPath("episode_index.md") ?? "";
+    const eps = listEpisodeMarkdowns().slice(0, 10);
+    return { outline, character, episodeIndex, eps };
+  };
+
+  const buildAlignerSystemPrompt = () => {
+    const aligner = getMarkdownByPath("agent-settings/script-aligner.md")?.trim();
+    if (!aligner) return null;
+    return [
+      aligner,
+      "",
+      "输出约束：",
+      "- 返回必须简洁、结构化，便于解析",
+      "- 必须明确给出 PASS 或 FAIL",
+      "- 若 FAIL：每条问题给出最小可行修改示例，并标注影响范围与优先级",
+      "- 不要输出```代码块，不要输出任何 XML 标签",
+    ].join("\n");
+  };
+
+  const runFullAlignerCheck = async (
+    requestConfig: { baseUrl: string; apiKey: string; modelName: string; params?: any },
+    signal: AbortSignal,
+  ) => {
+    const systemAligner = buildAlignerSystemPrompt();
+    if (!systemAligner) return { ok: false as const, message: "Error: 缺少 script-aligner 配置文件。" };
+
+    const { outline, character, episodeIndex, eps } = getStoryDocsSnapshot();
+    const payload = [
+      "请对 outline.md、character.md、episode_index.md 与最近 10 集 EP 文件做全量一致性检查，输出 PASS/FAIL 与问题清单（含最小可行修改示例、影响范围、优先级）。",
+      "",
+      "【outline.md】",
+      outline.trim() ? outline.trim() : "(空)",
+      "",
+      "【character.md】",
+      character.trim() ? character.trim() : "(空)",
+      "",
+      "【episode_index.md】",
+      episodeIndex.trim() ? episodeIndex.trim() : "(空)",
+      "",
+      ...eps.flatMap((ep) => ["", `【${ep.path}】`, ep.markdown.trim() ? ep.markdown.trim() : "(空)"]),
+    ].join("\n");
+
+    const report = await callChatStream(
+      requestConfig,
+      [
+        { role: "system", content: systemAligner },
+        { role: "user", content: payload },
+      ],
+      signal,
+    );
+    return { ok: true as const, report: report.trim() };
+  };
+
+  const runProgressRecorder = async (
+    requestConfig: { baseUrl: string; apiKey: string; modelName: string; params?: any },
+    signal: AbortSignal,
+  ) => {
+    const { outline, character, episodeIndex, eps } = getStoryDocsSnapshot();
+    const progress = await runRecorderUpdate(
+      requestConfig,
+      signal,
+      [
+        { path: "outline.md", markdown: outline },
+        { path: "character.md", markdown: character },
+        { path: "episode_index.md", markdown: episodeIndex },
+        ...eps.map((e) => ({ path: e.path, markdown: e.markdown })),
+      ],
+    );
+    if (!progress) return { ok: false as const, message: "Error: 缺少 script-recorder 配置文件。" };
+
+    const writeResult = executeFsAction("write", "script.progress.md", progress);
+    if (writeResult.startsWith("Error:")) {
+      return { ok: false as const, message: `更新失败：${writeResult}` };
+    }
+
+    return { ok: true as const, message: "已更新 script.progress.md。" };
+  };
+
   const runRecorderUpdate = async (
     requestConfig: { baseUrl: string; apiKey: string; modelName: string; params?: any },
     signal: AbortSignal,
@@ -1628,8 +1735,8 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
 
     const mainAgent = getMarkdownByPath("agent-settings/main-agent.md")?.trim();
     const mainAgentCh = getMarkdownByPath("agent-settings/main-agentch.md")?.trim();
-    const aligner = getMarkdownByPath("agent-settings/script-aligner.md")?.trim();
-    if (!mainAgent || !mainAgentCh || !aligner) {
+    const systemAligner = buildAlignerSystemPrompt();
+    if (!mainAgent || !mainAgentCh || !systemAligner) {
       setAssistant("Error: 缺少 agent-settings 配置文件，请新建项目或检查 agent-settings 文件夹。");
       return;
     }
@@ -1647,16 +1754,6 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
       "- 必须使用中文",
       "- 只输出目标文档的完整 markdown 内容",
       "- 不要输出```代码块，不要输出任何 <file_action> / <todo_action> / <user_question> 标签",
-    ].join("\n");
-
-    const systemAligner = [
-      aligner,
-      "",
-      "输出约束：",
-      "- 返回必须简洁、结构化，便于解析",
-      "- 必须明确给出 PASS 或 FAIL",
-      "- 若 FAIL：每条问题给出最小可行修改示例，并标注影响范围与优先级",
-      "- 不要输出```代码块，不要输出任何 XML 标签",
     ].join("\n");
 
     const generateAndCheck = async (
@@ -1936,50 +2033,16 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
     }
 
     if (cmd.kind === "checkAll") {
-      const eps = listEpisodeMarkdowns().slice(0, 10);
-      const payload = [
-        "请对 outline.md、character.md、episode_index.md 与最近 10 集 EP 文件做全量一致性检查，输出 PASS/FAIL 与问题清单（含最小可行修改示例、影响范围、优先级）。",
-        "",
-        "【outline.md】",
-        outline.trim() ? outline.trim() : "(空)",
-        "",
-        "【character.md】",
-        character.trim() ? character.trim() : "(空)",
-        "",
-        "【episode_index.md】",
-        episodeIndex.trim() ? episodeIndex.trim() : "(空)",
-        "",
-        ...eps.flatMap((ep) => ["", `【${ep.path}】`, ep.markdown.trim() ? ep.markdown.trim() : "(空)"]),
-      ].join("\n");
       setAssistant("正在进行全量检查…");
-      const report = await callChatStream(requestConfig, [{ role: "system", content: systemAligner }, { role: "user", content: payload }], signal);
-      setAssistant(report.trim());
+      const result = await runFullAlignerCheck(requestConfig, signal);
+      setAssistant(result.ok ? result.report : result.message);
       return;
     }
 
     if (cmd.kind === "recordNow") {
-      const eps = listEpisodeMarkdowns().slice(0, 10);
       setAssistant("正在更新进度记录…");
-      const progress = await runRecorderUpdate(
-        requestConfig,
-        signal,
-        [
-          { path: "outline.md", markdown: outline },
-          { path: "character.md", markdown: character },
-          { path: "episode_index.md", markdown: episodeIndex },
-          ...eps.map((e) => ({ path: e.path, markdown: e.markdown })),
-        ],
-      );
-      if (!progress) {
-        setAssistant("Error: 缺少 script-recorder 配置文件。");
-        return;
-      }
-      const writeResult = executeFsAction("write", "script.progress.md", progress);
-      if (writeResult.startsWith("Error:")) {
-        setAssistant(`更新失败：${writeResult}`);
-        return;
-      }
-      setAssistant("已更新 script.progress.md。");
+      const result = await runProgressRecorder(requestConfig, signal);
+      setAssistant(result.message);
       return;
     }
 
@@ -2229,12 +2292,17 @@ To manage your todo list:
 <todo_action type="read" />
 <todo_action type="clear" />
 
+To call a sub-agent tool:
+<agent_action type="aligner" />
+<agent_action type="recorder" />
+
 Rules:
 1. You CAN read files in 'agent-settings' folder, but CANNOT write to them.
 2. You CAN create/write files in the project root and 'episodes' folder.
 3. Path is relative to the current project root.
 4. When you want to overwrite a file, use 'write'. When you want to add content to the end of a file, use 'append'. When you want to modify a specific part, use 'replace' (the 'search' attribute is required).
-5. For <user_question> with options, provide 2-4 options. Use multi="true" only when multiple selections are allowed.`;
+5. For <user_question> with options, provide 2-4 options. Use multi="true" only when multiple selections are allowed.
+6. Use <agent_action type="aligner" /> to run a full consistency check, and <agent_action type="recorder" /> to update script.progress.md.`;
 
       // 构造发送给模型的消息列表
       const conversationHistory = projectConversations[activeProjectId]?.find(c => c.id === activeConversationId)?.messages || [];
@@ -2317,7 +2385,7 @@ Rules:
                     return {
                       ...c,
                       messages: c.messages.map((m) =>
-                        m.id === assistantMsgId ? { ...m, content: fullContent } : m
+                        m.id === assistantMsgId ? { ...m, content: sanitizeAssistantToolOutput(fullContent) } : m
                       ),
                     };
                   }),
@@ -2333,6 +2401,7 @@ Rules:
       const questionRegex = /<user_question(\s+[^>]+)>([\s\S]*?)<\/user_question>/g;
       const todoRegex = /<todo_action(\s+[^>]+)(?:>([\s\S]*?)<\/todo_action>|\s*\/?>)/g;
       const actionRegex = /<file_action(\s+[^>]+)(?:>([\s\S]*?)<\/file_action>|\s*\/?>)/g;
+      const agentActionRegex = /<agent_action(\s+[^>]+)(?:>([\s\S]*?)<\/agent_action>|\s*\/?>)/g;
       type ParsedFsAction = { type: FileActionType; path: string; search?: string; body?: string };
 
       const updateAssistant = (text: string) => {
@@ -2342,7 +2411,7 @@ Rules:
             if (c.id !== activeConversationId) return c;
             return {
               ...c,
-              messages: c.messages.map((m) => (m.id === assistantMsgId ? { ...m, content: text } : m)),
+              messages: c.messages.map((m) => (m.id === assistantMsgId ? { ...m, content: sanitizeAssistantToolOutput(text) } : m)),
             };
           }),
         }));
@@ -2487,12 +2556,14 @@ Rules:
       actionRegex.lastIndex = 0;
       questionRegex.lastIndex = 0;
       todoRegex.lastIndex = 0;
+      agentActionRegex.lastIndex = 0;
 
       let match: RegExpExecArray | null = null;
       const results: string[] = [];
       const actions: { type: FileActionType; path: string; ok: boolean }[] = [];
       const questions: UserQuestionPayload[] = [];
       const todoActions: Array<{ type: string; id?: string; body?: string }> = [];
+      const agentActions: AgentActionType[] = [];
       
       while ((match = actionRegex.exec(finalContent)) !== null) {
           const attrsStr = match[1];
@@ -2518,22 +2589,6 @@ Rules:
       }
 
       const okWritePaths = new Set(actions.filter((a) => a.ok && a.type !== "read" && isKeyDocPath(a.path)).map((a) => a.path));
-      if (okWritePaths.size > 0) {
-        const parsedForRecord = parseFsActions(finalContent).filter((a) => a.type !== "read" && okWritePaths.has(a.path));
-        const draftMap = new Map<string, string>();
-        for (const a of parsedForRecord) {
-          const prev = draftMap.has(a.path) ? (draftMap.get(a.path) ?? "") : getMarkdownByPath(a.path) ?? "";
-          draftMap.set(a.path, simulateApply(prev, a));
-        }
-        const changed = Array.from(draftMap.entries()).map(([path, markdown]) => ({ path, markdown }));
-        const progress = await runRecorderUpdate(requestConfig, controller.signal, changed);
-        if (progress) {
-          const progressWrite = executeFsAction("write", "script.progress.md", progress);
-          results.push(`[System] Action: write script.progress.md\nResult: ${progressWrite}`);
-          actions.push({ type: "write", path: "script.progress.md", ok: !progressWrite.startsWith("Error:") });
-        }
-      }
-
       let qMatch: RegExpExecArray | null = null;
       while ((qMatch = questionRegex.exec(finalContent)) !== null) {
         const attrsStr = qMatch[1];
@@ -2611,7 +2666,24 @@ Rules:
         todoActions.push({ type, id, body: body?.trim() });
       }
 
-      let displayContent = finalContent.replace(actionRegex, "").replace(questionRegex, "").replace(todoRegex, "").trim();
+      let aMatch: RegExpExecArray | null = null;
+      while ((aMatch = agentActionRegex.exec(finalContent)) !== null) {
+        const attrsStr = aMatch[1];
+        const getAttr = (name: string) => {
+          const match = attrsStr.match(new RegExp(`${name}=["']([^"']+)["']`));
+          return match ? match[1] : undefined;
+        };
+        const rawType = (getAttr("type") ?? getAttr("agent") ?? "").trim().toLowerCase();
+        if (rawType === "aligner" || rawType === "script-aligner") {
+          agentActions.push("aligner");
+          continue;
+        }
+        if (rawType === "recorder" || rawType === "script-recorder") {
+          agentActions.push("recorder");
+        }
+      }
+
+      let displayContent = sanitizeAssistantToolOutput(finalContent);
       if (forcedAlignerReport) {
         displayContent = `${displayContent}\n\n【Aligner建议（已强制通过）】\n${forcedAlignerReport}`.trim();
       }
@@ -2682,6 +2754,42 @@ Rules:
         }
         return { next, readRequested };
       };
+
+      const explicitRecorderRequested = agentActions.includes("recorder");
+      const explicitAlignerRequested = agentActions.includes("aligner");
+
+      if (okWritePaths.size > 0 && !explicitRecorderRequested) {
+        const parsedForRecord = parseFsActions(finalContent).filter((a) => a.type !== "read" && okWritePaths.has(a.path));
+        const draftMap = new Map<string, string>();
+        for (const a of parsedForRecord) {
+          const prev = draftMap.has(a.path) ? (draftMap.get(a.path) ?? "") : getMarkdownByPath(a.path) ?? "";
+          draftMap.set(a.path, simulateApply(prev, a));
+        }
+        const changed = Array.from(draftMap.entries()).map(([path, markdown]) => ({ path, markdown }));
+        const progress = await runRecorderUpdate(requestConfig, controller.signal, changed);
+        if (progress) {
+          const progressWrite = executeFsAction("write", "script.progress.md", progress);
+          results.push(`[System] Action: write script.progress.md\nResult: ${progressWrite}`);
+          actions.push({ type: "write", path: "script.progress.md", ok: !progressWrite.startsWith("Error:") });
+        }
+      }
+
+      if (explicitAlignerRequested) {
+        const alignerResult = await runFullAlignerCheck(requestConfig, controller.signal);
+        results.push(
+          alignerResult.ok
+            ? `[System] Agent: script-aligner\nResult:\n${alignerResult.report}`
+            : `[System] Agent: script-aligner\nResult: ${alignerResult.message}`
+        );
+      }
+
+      if (explicitRecorderRequested) {
+        const recorderResult = await runProgressRecorder(requestConfig, controller.signal);
+        results.push(`[System] Agent: script-recorder\nResult: ${recorderResult.message}`);
+        if (recorderResult.ok) {
+          actions.push({ type: "write", path: "script.progress.md", ok: true });
+        }
+      }
 
       const resultMsgId = results.length > 0 ? uid("m") : null;
       const resultContent = results.join("\n\n");
