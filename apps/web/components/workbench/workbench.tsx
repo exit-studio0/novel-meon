@@ -750,7 +750,7 @@ description: 将Claude Code的输出转换为适合中国微短剧的创作风�
 
 [自动触发规则]
 - 每次主 Agent 生成或修改任何关键文档（outline.md、character.md、episode_index.md、EP-XX.md）前，必须自动调用 script-aligner 进行检查；除非用户明确下达跳过检查的指令。
-- 当 script-aligner 返回 FAIL 时，主 Agent 必须根据 aligner 指示进行修正并重新提交检查；复检次数最少2次，最多3次；第3次仍 FAIL 则强制通过并附带建议。
+- 当 script-aligner 返回 FAIL 时，主 Agent 必须根据 aligner 指示进行修正并重新提交检查；通常检查1次，必要时最多复检2次；仅在明确 FAIL 时进入修订，第2次仍 FAIL 则强制通过并附带建议。
 - 在文档被写入 repository（写入文件系统或数据库）后，必须自动调用 script-recorder 记录变更并更新 script.progress.md。
 - 任何章节关键字（如付费点、主要反转、人物死亡、身份揭露）被新增/修改时，script-recorder 要立即标记为“高影响变更”，并在记录中单独列出影响点与关联集数。
 - 定期（例如每完成10集）触发一次全量对齐检查：由主 Agent 调用 script-aligner 对 outline.md + episode_index.md + 最近10集 EP 文件进行批量检查，并生成汇总报告。
@@ -1513,16 +1513,40 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
     return fullContent;
   };
 
-  const extractAlignerStatus = (raw: string) => {
+  type AlignerStatus = "PASS" | "FAIL" | "UNKNOWN";
+
+  const ALIGNER_MIN_CHECKS = 1;
+  const ALIGNER_MAX_CHECKS = 2;
+
+  const extractAlignerStatus = (raw: string): AlignerStatus => {
     const t = raw.trim();
-    const hasFail = /(^|\W)FAIL(\W|$)/i.test(t) || t.includes("❌") || t.includes("检查未通过");
-    const hasPass = /(^|\W)PASS(\W|$)/i.test(t) || t.includes("✅") || t.includes("检查通过");
-    if (hasFail && !hasPass) return "FAIL" as const;
-    if (hasPass && !hasFail) return "PASS" as const;
-    if (hasFail) return "FAIL" as const;
-    if (hasPass) return "PASS" as const;
-    return "FAIL" as const;
+    if (!t) return "UNKNOWN";
+
+    // Prefer explicit status fields when the aligner follows the requested format.
+    const explicitStatus =
+      t.match(/检查状态[:：]\s*(PASS|FAIL)/i)?.[1] ??
+      t.match(/^\s*(PASS|FAIL)\s*$/im)?.[1];
+    if (explicitStatus) {
+      return explicitStatus.toUpperCase() as Exclude<AlignerStatus, "UNKNOWN">;
+    }
+
+    const hasFail =
+      /(^|\W)FAIL(\W|$)/i.test(t) ||
+      t.includes("❌") ||
+      t.includes("检查未通过") ||
+      t.includes("需要修改以下问题") ||
+      t.includes("请修改后重新提交检查");
+    const hasPass =
+      /(^|\W)PASS(\W|$)/i.test(t) ||
+      t.includes("✅") ||
+      t.includes("检查通过");
+
+    if (hasFail && !hasPass) return "FAIL";
+    if (hasPass && !hasFail) return "PASS";
+    return "UNKNOWN";
   };
+
+  const isAlignerPassLike = (status: AlignerStatus) => status !== "FAIL";
 
   const runRecorderUpdate = async (
     requestConfig: { baseUrl: string; apiKey: string; modelName: string; params?: any },
@@ -1645,10 +1669,7 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
       draft = await callChatStream(requestConfig, [{ role: "system", content: systemMain }, { role: "user", content: buildMainUser() }], signal);
       draft = draft.trim();
 
-      const minChecks = 2;
-      const maxChecks = 3;
-
-      for (let i = 1; i <= maxChecks; i++) {
+      for (let i = 1; i <= ALIGNER_MAX_CHECKS; i++) {
         setAssistant(i === 1 ? "正在进行一致性检查…" : `正在进行复检…（第 ${i} 次）`);
         const report = await callChatStream(
           requestConfig,
@@ -1656,10 +1677,10 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
           signal,
         );
         const status = extractAlignerStatus(report);
-        if (status === "PASS" && i < minChecks) {
+        if (isAlignerPassLike(status) && i < ALIGNER_MIN_CHECKS) {
           continue;
         }
-        if (status === "PASS") {
+        if (isAlignerPassLike(status)) {
           const writeResult = executeFsAction("write", targetPath, draft);
           if (writeResult.startsWith("Error:")) {
             setAssistant(`写入失败：${writeResult}`);
@@ -1679,7 +1700,7 @@ description: 创作进度记录员，负责在文档写入后提取关键信息�
           return { ok: true, report, draft };
         }
 
-        if (i >= maxChecks) {
+        if (i >= ALIGNER_MAX_CHECKS) {
           const writeResult = executeFsAction("write", targetPath, draft);
           if (writeResult.startsWith("Error:")) {
             setAssistant(`写入失败：${writeResult}\n\n【Aligner建议】\n${report.trim()}`);
@@ -2427,19 +2448,17 @@ Rules:
         return { status, report: report.trim() };
       };
 
-      const minChecks = 2;
-      const maxChecks = 3;
       let forcedAlignerReport: string | null = null;
       let finalContent = fullContent;
-      for (let i = 1; i <= maxChecks; i++) {
+      for (let i = 1; i <= ALIGNER_MAX_CHECKS; i++) {
         const gated = await runAlignerGate(finalContent);
-        if (gated.status === "PASS" && i < minChecks) {
+        if (isAlignerPassLike(gated.status) && i < ALIGNER_MIN_CHECKS) {
           updateAssistant(`检查通过，正在进行复检…（第 ${i + 1} 次）`);
           continue;
         }
-        if (gated.status === "PASS") break;
-        if (i >= maxChecks) {
-          forcedAlignerReport = gated.report || `检查未通过，已达到最大复检次数（${maxChecks}次）。`;
+        if (isAlignerPassLike(gated.status)) break;
+        if (i >= ALIGNER_MAX_CHECKS) {
+          forcedAlignerReport = gated.report || `检查未通过，已达到最大复检次数（${ALIGNER_MAX_CHECKS}次）。`;
           updateAssistant(`第 ${i} 次复检仍未通过，已强制通过。\n\n【Aligner建议】\n${forcedAlignerReport}`);
           break;
         }
